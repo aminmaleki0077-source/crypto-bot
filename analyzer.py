@@ -1,6 +1,7 @@
 """
-Advanced Crypto Analyzer
-Uses CoinGecko API (free) + technical analysis + news sentiment
+Advanced Crypto Analyzer v2
+Technical: RSI, MACD, Bollinger, EMA, Ichimoku
+Fundamental: Market cap, volume ratio, dominance, dev activity
 """
 
 import asyncio
@@ -11,45 +12,39 @@ from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
-
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
-# Top coins to scan by default
 DEFAULT_SCAN_LIST = [
-    "bitcoin", "ethereum", "binancecoin", "solana", "ripple",
-    "cardano", "avalanche-2", "polkadot", "chainlink", "polygon",
-    "near", "arbitrum", "optimism", "the-graph", "injective-protocol",
-    "sui", "aptos", "sei-network", "celestia", "starknet",
-    "render-token", "fet", "ocean-protocol", "worldcoin-wld",
-    "pepe", "dogecoin", "shiba-inu", "floki", "bonk",
-    "toncoin", "internet-computer", "hedera-hashgraph", "vechain",
-    "uniswap", "aave", "compound-governance-token", "maker",
-    "lido-dao", "curve-dao-token",
+    "bitcoin","ethereum","binancecoin","solana","ripple",
+    "cardano","avalanche-2","polkadot","chainlink","polygon",
+    "near","arbitrum","optimism","injective-protocol","sui",
+    "aptos","celestia","render-token","fetch-ai","ocean-protocol",
+    "pepe","dogecoin","shiba-inu","floki","bonk",
+    "toncoin","internet-computer","hedera-hashgraph",
+    "uniswap","aave","maker","lido-dao","curve-dao-token",
 ]
 
 
 class CryptoAnalyzer:
     def __init__(self):
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.session = None
         self._cache = {}
-        self._cache_ttl = 300  # 5 minutes
+        self._cache_ttl = 300
 
     async def _get_session(self):
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession(
-                headers={"User-Agent": "CryptoPumpBot/1.0"},
+                headers={"User-Agent": "CryptoPumpBot/2.0"},
                 timeout=aiohttp.ClientTimeout(total=30)
             )
         return self.session
 
-    async def _get(self, url: str, params: dict = None) -> Optional[dict]:
-        """Make GET request with caching"""
-        cache_key = f"{url}?{params}"
+    async def _get(self, url, params=None):
+        cache_key = f"{url}{params}"
         if cache_key in self._cache:
             data, ts = self._cache[cache_key]
             if (datetime.now().timestamp() - ts) < self._cache_ttl:
                 return data
-
         try:
             session = await self._get_session()
             async with session.get(url, params=params) as resp:
@@ -64,449 +59,509 @@ class CryptoAnalyzer:
             logger.error(f"Request error: {e}")
         return None
 
-    # ─── Data Fetching ────────────────────────────────────────────────────────
+    # ── Data Fetching ──────────────────────────────────────────────────────────
 
-    async def get_coin_data(self, coin_id: str) -> Optional[dict]:
-        """Fetch full coin data from CoinGecko"""
-        url = f"{COINGECKO_BASE}/coins/{coin_id}"
-        params = {
-            "localization": "false",
-            "tickers": "false",
-            "market_data": "true",
-            "community_data": "true",
-            "developer_data": "false",
-            "sparkline": "false"
-        }
-        return await self._get(url, params)
+    async def get_coin_data(self, coin_id):
+        return await self._get(f"{COINGECKO_BASE}/coins/{coin_id}", {
+            "localization": "false", "tickers": "false",
+            "market_data": "true", "community_data": "true",
+            "developer_data": "true", "sparkline": "false"
+        })
 
-    async def get_ohlcv(self, coin_id: str, days: int = 30) -> Optional[list]:
-        """Get OHLCV data for technical analysis"""
-        url = f"{COINGECKO_BASE}/coins/{coin_id}/ohlc"
-        params = {"vs_currency": "usd", "days": days}
-        return await self._get(url, params)
+    async def get_market_chart(self, coin_id, days=60):
+        return await self._get(f"{COINGECKO_BASE}/coins/{coin_id}/market_chart", {
+            "vs_currency": "usd", "days": days, "interval": "daily"
+        })
 
-    async def get_market_chart(self, coin_id: str, days: int = 14) -> Optional[dict]:
-        """Get price/volume history"""
-        url = f"{COINGECKO_BASE}/coins/{coin_id}/market_chart"
-        params = {"vs_currency": "usd", "days": days, "interval": "daily"}
-        return await self._get(url, params)
+    async def get_markets_batch(self, ids):
+        return await self._get(f"{COINGECKO_BASE}/coins/markets", {
+            "vs_currency": "usd", "ids": ",".join(ids),
+            "order": "market_cap_desc", "per_page": 50, "page": 1,
+            "sparkline": "false", "price_change_percentage": "1h,24h,7d,30d"
+        })
 
-    async def get_markets_batch(self, ids: List[str]) -> Optional[list]:
-        """Get market data for multiple coins"""
-        url = f"{COINGECKO_BASE}/coins/markets"
-        params = {
-            "vs_currency": "usd",
-            "ids": ",".join(ids),
-            "order": "market_cap_desc",
-            "per_page": 50,
-            "page": 1,
-            "sparkline": "false",
-            "price_change_percentage": "1h,24h,7d"
-        }
-        return await self._get(url, params)
+    async def get_global_data(self):
+        return await self._get(f"{COINGECKO_BASE}/global")
 
-    async def get_global_data(self) -> Optional[dict]:
-        """Get global crypto market data"""
-        url = f"{COINGECKO_BASE}/global"
-        return await self._get(url)
+    async def get_fear_greed(self):
+        return await self._get("https://api.alternative.me/fng/")
 
-    async def get_fear_greed(self) -> Optional[dict]:
-        """Get Fear & Greed index"""
-        url = "https://api.alternative.me/fng/"
-        return await self._get(url)
+    async def get_trending(self):
+        return await self._get(f"{COINGECKO_BASE}/search/trending")
 
-    async def get_trending(self) -> Optional[dict]:
-        """Get trending coins"""
-        url = f"{COINGECKO_BASE}/search/trending"
-        return await self._get(url)
+    # ── Technical Indicators ───────────────────────────────────────────────────
 
-    # ─── Technical Analysis ───────────────────────────────────────────────────
-
-    def calc_rsi(self, prices: list, period: int = 14) -> float:
+    def calc_rsi(self, prices, period=14):
         if len(prices) < period + 1:
             return 50.0
-        prices = np.array(prices)
+        prices = np.array(prices, dtype=float)
         deltas = np.diff(prices)
-        gains = np.where(deltas > 0, deltas, 0)
-        losses = np.where(deltas < 0, -deltas, 0)
-
+        gains = np.where(deltas > 0, deltas, 0.0)
+        losses = np.where(deltas < 0, -deltas, 0.0)
         avg_gain = np.mean(gains[:period])
         avg_loss = np.mean(losses[:period])
-
         for i in range(period, len(deltas)):
             avg_gain = (avg_gain * (period - 1) + gains[i]) / period
             avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-
         if avg_loss == 0:
             return 100.0
-        rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
+        return round(100 - (100 / (1 + avg_gain / avg_loss)), 2)
 
-    def calc_ema(self, prices: list, period: int) -> np.ndarray:
+    def calc_ema(self, prices, period):
         prices = np.array(prices, dtype=float)
+        if len(prices) < period:
+            return prices
         ema = np.zeros_like(prices)
         ema[0] = prices[0]
-        multiplier = 2 / (period + 1)
+        k = 2 / (period + 1)
         for i in range(1, len(prices)):
-            ema[i] = (prices[i] * multiplier) + (ema[i - 1] * (1 - multiplier))
+            ema[i] = prices[i] * k + ema[i-1] * (1 - k)
         return ema
 
-    def calc_macd(self, prices: list) -> dict:
+    def calc_macd(self, prices):
         if len(prices) < 26:
-            return {'signal': 'neutral', 'histogram': 0}
+            return {'signal': 'neutral', 'histogram': 0, 'macd': 0, 'strength': 0}
         ema12 = self.calc_ema(prices, 12)
         ema26 = self.calc_ema(prices, 26)
         macd_line = ema12 - ema26
         signal_line = self.calc_ema(macd_line.tolist(), 9)
-        histogram = macd_line[-1] - signal_line[-1]
-        return {
-            'signal': 'bullish' if histogram > 0 and macd_line[-1] > macd_line[-2] else
-                      'bearish' if histogram < 0 else 'neutral',
-            'histogram': float(histogram),
-            'macd': float(macd_line[-1]),
-            'signal_line': float(signal_line[-1])
-        }
+        hist = macd_line[-1] - signal_line[-1]
+        hist_prev = macd_line[-2] - signal_line[-2] if len(macd_line) > 1 else 0
+        # Strength: is histogram growing?
+        strength = abs(hist) / (abs(macd_line[-1]) + 1e-10)
+        if hist > 0 and hist > hist_prev:
+            signal = 'bullish_strong'
+        elif hist > 0:
+            signal = 'bullish'
+        elif hist < 0 and hist < hist_prev:
+            signal = 'bearish_strong'
+        elif hist < 0:
+            signal = 'bearish'
+        else:
+            signal = 'neutral'
+        return {'signal': signal, 'histogram': float(hist),
+                'macd': float(macd_line[-1]), 'strength': float(strength)}
 
-    def calc_bollinger(self, prices: list, period: int = 20) -> dict:
+    def calc_bollinger(self, prices, period=20):
         if len(prices) < period:
-            return {'signal': 'neutral', 'position': 50}
-        prices = np.array(prices[-period:])
-        mid = np.mean(prices)
-        std = np.std(prices)
+            return {'signal': 'neutral', 'position': 50, 'width': 0}
+        arr = np.array(prices[-period:], dtype=float)
+        mid = np.mean(arr)
+        std = np.std(arr)
         upper = mid + 2 * std
         lower = mid - 2 * std
         current = prices[-1]
-        position = (current - lower) / (upper - lower) * 100 if upper != lower else 50
-        return {
-            'signal': 'oversold' if position < 20 else 'overbought' if position > 80 else 'neutral',
-            'position': float(position),
-            'upper': float(upper),
-            'lower': float(lower),
-            'mid': float(mid)
-        }
-
-    def calc_volume_analysis(self, volumes: list) -> dict:
-        if len(volumes) < 7:
-            return {'unusual': False, 'ratio': 1.0}
-        recent = np.mean(volumes[-3:])
-        average = np.mean(volumes[-14:-3])
-        ratio = recent / average if average > 0 else 1.0
-        return {
-            'unusual': ratio > 2.0,
-            'ratio': float(ratio),
-            'trend': 'increasing' if ratio > 1.3 else 'decreasing' if ratio < 0.7 else 'normal'
-        }
-
-    def calc_support_resistance(self, prices: list) -> dict:
-        if len(prices) < 10:
-            return {'support': prices[-1] * 0.95, 'resistance': prices[-1] * 1.05}
-        prices = np.array(prices)
-        recent_low = np.min(prices[-14:])
-        recent_high = np.max(prices[-14:])
-        current = prices[-1]
-        return {
-            'support': float(recent_low),
-            'resistance': float(recent_high),
-            'position_pct': float((current - recent_low) / (recent_high - recent_low) * 100) if recent_high != recent_low else 50
-        }
-
-    # ─── Pump Probability Score ───────────────────────────────────────────────
-
-    def calculate_pump_probability(self, indicators: dict) -> float:
-        """
-        Multi-factor pump probability score (0-100%)
-        Weights based on historical pump patterns
-        """
-        score = 0.0
-        weights = {
-            'rsi': 20,
-            'macd': 20,
-            'volume': 25,
-            'bollinger': 15,
-            'trend': 10,
-            'momentum': 10,
-        }
-
-        # RSI (oversold = higher pump chance)
-        rsi = indicators.get('rsi', 50)
-        if rsi < 30:
-            score += weights['rsi'] * 1.0      # Very oversold
-        elif rsi < 40:
-            score += weights['rsi'] * 0.75
-        elif rsi < 50:
-            score += weights['rsi'] * 0.5
-        elif rsi < 60:
-            score += weights['rsi'] * 0.4
-        elif rsi > 70:
-            score += weights['rsi'] * 0.1      # Overbought = lower chance
-
-        # MACD
-        macd = indicators.get('macd_signal', 'neutral')
-        if macd == 'bullish':
-            score += weights['macd']
-        elif macd == 'neutral':
-            score += weights['macd'] * 0.4
-
-        # Volume (unusual volume = pump signal)
-        vol_ratio = indicators.get('volume_ratio', 1.0)
-        if vol_ratio > 3.0:
-            score += weights['volume'] * 1.0
-        elif vol_ratio > 2.0:
-            score += weights['volume'] * 0.85
-        elif vol_ratio > 1.5:
-            score += weights['volume'] * 0.6
-        elif vol_ratio > 1.2:
-            score += weights['volume'] * 0.4
+        pos = (current - lower) / (upper - lower) * 100 if upper != lower else 50
+        width = (upper - lower) / mid * 100  # band width %
+        if pos < 15:
+            signal = 'strong_oversold'
+        elif pos < 30:
+            signal = 'oversold'
+        elif pos > 85:
+            signal = 'strong_overbought'
+        elif pos > 70:
+            signal = 'overbought'
         else:
-            score += weights['volume'] * 0.1
+            signal = 'neutral'
+        return {'signal': signal, 'position': float(pos),
+                'upper': float(upper), 'lower': float(lower),
+                'mid': float(mid), 'width': float(width)}
 
-        # Bollinger
-        bb_signal = indicators.get('bb_signal', 'neutral')
-        if bb_signal == 'oversold':
-            score += weights['bollinger']
-        elif bb_signal == 'neutral':
-            score += weights['bollinger'] * 0.5
+    def calc_ichimoku(self, prices):
+        """Ichimoku Cloud - simplified daily version"""
+        if len(prices) < 52:
+            return {'signal': 'neutral', 'above_cloud': None, 'tk_cross': 'neutral'}
+        arr = np.array(prices, dtype=float)
+        # Tenkan-sen (9)
+        tenkan = (np.max(arr[-9:]) + np.min(arr[-9:])) / 2
+        # Kijun-sen (26)
+        kijun = (np.max(arr[-26:]) + np.min(arr[-26:])) / 2
+        # Senkou A (avg of tenkan+kijun)
+        senkou_a = (tenkan + kijun) / 2
+        # Senkou B (52)
+        senkou_b = (np.max(arr[-52:]) + np.min(arr[-52:])) / 2
+        current = arr[-1]
+        cloud_top = max(senkou_a, senkou_b)
+        cloud_bottom = min(senkou_a, senkou_b)
 
-        # Recent price trend
-        change_24h = indicators.get('change_24h', 0)
-        change_7d = indicators.get('change_7d', 0)
-        if -10 < change_24h < 5 and change_7d < -10:
-            score += weights['trend'] * 0.9    # Recent dip after bigger drop
-        elif 0 < change_24h < 10:
-            score += weights['trend'] * 0.7    # Moderate positive momentum
-        elif change_24h > 10:
-            score += weights['trend'] * 0.4    # Already pumping
+        if current > cloud_top:
+            cloud_signal = 'above_cloud'  # bullish
+        elif current < cloud_bottom:
+            cloud_signal = 'below_cloud'  # bearish
+        else:
+            cloud_signal = 'inside_cloud'  # neutral
 
-        # 1h momentum
-        change_1h = indicators.get('change_1h', 0)
-        if 0 < change_1h < 3:
-            score += weights['momentum']
-        elif change_1h > 3:
-            score += weights['momentum'] * 0.5
+        # TK cross
+        if tenkan > kijun:
+            tk = 'bullish'
+        elif tenkan < kijun:
+            tk = 'bearish'
+        else:
+            tk = 'neutral'
 
-        return min(100.0, max(0.0, score))
+        return {
+            'signal': cloud_signal,
+            'tenkan': float(tenkan),
+            'kijun': float(kijun),
+            'senkou_a': float(senkou_a),
+            'senkou_b': float(senkou_b),
+            'tk_cross': tk,
+            'above_cloud': current > cloud_top
+        }
 
-    # ─── Main Analysis ────────────────────────────────────────────────────────
+    def calc_volume_analysis(self, volumes):
+        if len(volumes) < 7:
+            return {'unusual': False, 'ratio': 1.0, 'trend': 'normal'}
+        recent = np.mean(volumes[-3:])
+        avg = np.mean(volumes[-14:-3]) if len(volumes) >= 14 else np.mean(volumes[:-3])
+        ratio = recent / avg if avg > 0 else 1.0
+        if ratio > 3.0: trend = 'explosive'
+        elif ratio > 2.0: trend = 'very_high'
+        elif ratio > 1.5: trend = 'high'
+        elif ratio > 1.2: trend = 'above_avg'
+        elif ratio < 0.5: trend = 'very_low'
+        else: trend = 'normal'
+        return {'unusual': ratio > 2.0, 'ratio': float(ratio), 'trend': trend}
+
+    def calc_support_resistance(self, prices):
+        if len(prices) < 10:
+            p = prices[-1] if prices else 1
+            return {'support': p * 0.95, 'resistance': p * 1.05, 'position_pct': 50}
+        arr = np.array(prices, dtype=float)
+        low14 = float(np.min(arr[-14:]))
+        high14 = float(np.max(arr[-14:]))
+        low30 = float(np.min(arr[-30:])) if len(arr) >= 30 else low14
+        high30 = float(np.max(arr[-30:])) if len(arr) >= 30 else high14
+        current = float(arr[-1])
+        pos = (current - low14) / (high14 - low14) * 100 if high14 != low14 else 50
+        return {
+            'support': low14, 'resistance': high14,
+            'support_30': low30, 'resistance_30': high30,
+            'position_pct': float(pos)
+        }
+
+    # ── Fundamental Score ──────────────────────────────────────────────────────
+
+    def calc_fundamental_score(self, coin_data) -> dict:
+        """Score fundamental factors 0-100"""
+        score = 0
+        details = {}
+        md = coin_data.get('market_data', {})
+
+        # 1. Volume/MarketCap ratio (liquidity)
+        vol = md.get('total_volume', {}).get('usd', 0) or 0
+        mcap = md.get('market_cap', {}).get('usd', 1) or 1
+        vol_ratio = vol / mcap
+        if vol_ratio > 0.15: s = 25
+        elif vol_ratio > 0.08: s = 20
+        elif vol_ratio > 0.04: s = 15
+        elif vol_ratio > 0.02: s = 10
+        else: s = 5
+        score += s
+        details['liquidity'] = {'score': s, 'ratio': round(vol_ratio * 100, 2)}
+
+        # 2. Market cap rank (lower = bigger = more trusted)
+        rank = coin_data.get('market_cap_rank', 999) or 999
+        if rank <= 10: s = 25
+        elif rank <= 50: s = 20
+        elif rank <= 100: s = 15
+        elif rank <= 200: s = 10
+        else: s = 5
+        score += s
+        details['rank'] = {'score': s, 'rank': rank}
+
+        # 3. Community (reddit, twitter followers)
+        community = coin_data.get('community_data', {}) or {}
+        reddit = community.get('reddit_subscribers', 0) or 0
+        twitter = community.get('twitter_followers', 0) or 0
+        total_community = reddit + twitter
+        if total_community > 1_000_000: s = 25
+        elif total_community > 500_000: s = 20
+        elif total_community > 100_000: s = 15
+        elif total_community > 10_000: s = 10
+        else: s = 5
+        score += s
+        details['community'] = {'score': s, 'followers': total_community}
+
+        # 4. Developer activity
+        dev = coin_data.get('developer_data', {}) or {}
+        commits = (dev.get('commit_count_4_weeks', 0) or 0)
+        prs = (dev.get('pull_requests_merged', 0) or 0)
+        dev_score_raw = commits + prs
+        if dev_score_raw > 200: s = 25
+        elif dev_score_raw > 100: s = 20
+        elif dev_score_raw > 50: s = 15
+        elif dev_score_raw > 10: s = 10
+        else: s = 5
+        score += s
+        details['dev_activity'] = {'score': s, 'commits_4w': commits}
+
+        return {'total': score, 'max': 100, 'details': details}
+
+    # ── Final Pump Probability ─────────────────────────────────────────────────
+
+    def calculate_pump_probability(self, tech: dict, fundamental: dict) -> dict:
+        """
+        Combined technical + fundamental pump probability
+        Returns score 0-100 with breakdown
+        """
+        tech_score = 0
+        tech_max = 60  # technical = 60% weight
+
+        # RSI (0-15)
+        rsi = tech.get('rsi', 50)
+        if rsi < 25: r = 15
+        elif rsi < 35: r = 12
+        elif rsi < 45: r = 8
+        elif rsi < 55: r = 5
+        elif rsi > 75: r = 1
+        else: r = 3
+        tech_score += r
+
+        # MACD (0-15)
+        macd_sig = tech.get('macd_signal', 'neutral')
+        if macd_sig == 'bullish_strong': r = 15
+        elif macd_sig == 'bullish': r = 10
+        elif macd_sig == 'neutral': r = 5
+        elif macd_sig == 'bearish': r = 2
+        else: r = 0
+        tech_score += r
+
+        # Volume (0-15)
+        vol_ratio = tech.get('volume_ratio', 1.0)
+        if vol_ratio > 4.0: r = 15
+        elif vol_ratio > 3.0: r = 13
+        elif vol_ratio > 2.0: r = 10
+        elif vol_ratio > 1.5: r = 7
+        elif vol_ratio > 1.2: r = 4
+        else: r = 1
+        tech_score += r
+
+        # Bollinger (0-10)
+        bb_sig = tech.get('bb_signal', 'neutral')
+        if bb_sig == 'strong_oversold': r = 10
+        elif bb_sig == 'oversold': r = 7
+        elif bb_sig == 'neutral': r = 4
+        elif bb_sig == 'overbought': r = 1
+        else: r = 0
+        tech_score += r
+
+        # Ichimoku (0-10)
+        ichi_sig = tech.get('ichimoku_signal', 'neutral')
+        ichi_tk = tech.get('ichimoku_tk', 'neutral')
+        if ichi_sig == 'above_cloud' and ichi_tk == 'bullish': r = 10
+        elif ichi_sig == 'above_cloud': r = 7
+        elif ichi_sig == 'inside_cloud' and ichi_tk == 'bullish': r = 5
+        elif ichi_sig == 'inside_cloud': r = 3
+        else: r = 1
+        tech_score += r
+
+        # Price trend (0-5)
+        c24 = tech.get('change_24h', 0)
+        c7d = tech.get('change_7d', 0)
+        if -8 < c24 < 3 and c7d < -15: r = 5
+        elif 0 < c24 < 8: r = 4
+        elif c24 > 8: r = 2
+        else: r = 2
+        tech_score += r
+
+        # Fundamental score (40% weight → 0-40)
+        fund_raw = fundamental.get('total', 50)
+        fund_score = fund_raw * 0.4
+
+        total = min(100, tech_score + fund_score)
+
+        # Verdict
+        if total >= 80: verdict = '🚀 بسیار قوی'
+        elif total >= 65: verdict = '📈 قوی'
+        elif total >= 50: verdict = '🟡 متوسط'
+        elif total >= 35: verdict = '🔶 ضعیف'
+        else: verdict = '🔴 منفی'
+
+        return {
+            'total': round(total, 1),
+            'technical': round(tech_score, 1),
+            'fundamental': round(fund_score, 1),
+            'verdict': verdict
+        }
+
+    # ── Main Analysis ──────────────────────────────────────────────────────────
 
     async def analyze_coin(self, coin_id: str) -> dict:
-        """Full analysis of a single coin"""
         try:
-            # Fetch data concurrently
-            coin_data, chart_data, ohlcv_data = await asyncio.gather(
+            coin_data, chart_data = await asyncio.gather(
                 self.get_coin_data(coin_id),
-                self.get_market_chart(coin_id, days=30),
-                self.get_ohlcv(coin_id, days=30),
+                self.get_market_chart(coin_id, days=60),
                 return_exceptions=True
             )
-
-            if isinstance(coin_data, Exception) or coin_data is None:
+            if isinstance(coin_data, Exception) or not coin_data:
                 return {'error': f'داده‌ای برای {coin_id} یافت نشد'}
 
             md = coin_data.get('market_data', {})
-            current_price = md.get('current_price', {}).get('usd', 0)
+            current_price = md.get('current_price', {}).get('usd', 0) or 0
 
-            # Price history
-            prices = []
-            volumes = []
+            prices, volumes = [], []
             if chart_data and not isinstance(chart_data, Exception):
                 prices = [p[1] for p in chart_data.get('prices', [])]
                 volumes = [v[1] for v in chart_data.get('total_volumes', [])]
 
-            # Technical indicators
-            rsi = self.calc_rsi(prices) if len(prices) > 14 else 50.0
+            rsi = self.calc_rsi(prices)
             macd = self.calc_macd(prices)
             bb = self.calc_bollinger(prices)
-            vol_analysis = self.calc_volume_analysis(volumes)
+            ichi = self.calc_ichimoku(prices)
+            vol_a = self.calc_volume_analysis(volumes)
             sr = self.calc_support_resistance(prices)
+            fund = self.calc_fundamental_score(coin_data)
 
             change_24h = md.get('price_change_percentage_24h', 0) or 0
             change_7d = md.get('price_change_percentage_7d', 0) or 0
+            change_30d = md.get('price_change_percentage_30d', 0) or 0
             change_1h = md.get('price_change_percentage_1h_in_currency', {}).get('usd', 0) or 0
 
-            ema20 = self.calc_ema(prices, 20)[-1] if len(prices) >= 20 else current_price
-            ema50 = self.calc_ema(prices, 50)[-1] if len(prices) >= 50 else current_price
-            ema_signal = "صعودی ✅" if current_price > ema20 > ema50 else \
-                         "نزولی ❌" if current_price < ema20 < ema50 else "خنثی ➡️"
+            ema20 = float(self.calc_ema(prices, 20)[-1]) if len(prices) >= 20 else current_price
+            ema50 = float(self.calc_ema(prices, 50)[-1]) if len(prices) >= 50 else current_price
+            if current_price > ema20 > ema50: ema_signal = '✅ صعودی'
+            elif current_price < ema20 < ema50: ema_signal = '❌ نزولی'
+            else: ema_signal = '➡️ خنثی'
 
-            indicators = {
+            tech = {
                 'rsi': rsi,
                 'macd_signal': macd['signal'],
-                'volume_ratio': vol_analysis['ratio'],
+                'volume_ratio': vol_a['ratio'],
                 'bb_signal': bb['signal'],
+                'ichimoku_signal': ichi['signal'],
+                'ichimoku_tk': ichi['tk_cross'],
                 'change_24h': change_24h,
                 'change_7d': change_7d,
-                'change_1h': change_1h,
             }
 
-            pump_prob = self.calculate_pump_probability(indicators)
+            pump = self.calculate_pump_probability(tech, fund)
 
             # Buy/Sell zones
-            buy_zone = current_price * 0.98  # 2% below current
-            target1 = current_price * 1.10   # +10%
-            target2 = current_price * 1.20   # +20%
-            stop_loss = sr['support'] * 0.97
-
-            # Better buy zone: near support
-            if sr['position_pct'] > 60:
-                buy_zone = sr['support'] * 1.01
-            elif sr['position_pct'] < 30:
-                buy_zone = current_price  # Already near support
+            buy_zone = sr['support'] * 1.005 if sr['position_pct'] > 40 else current_price * 0.99
+            target1 = current_price * 1.10
+            target2 = current_price * 1.22
+            target3 = current_price * 1.40
+            stop_loss = sr['support'] * 0.96
 
             return {
                 'id': coin_id,
                 'symbol': coin_data.get('symbol', '').upper(),
                 'name': coin_data.get('name', ''),
                 'price': current_price,
+                'change_1h': change_1h,
                 'change_24h': change_24h,
                 'change_7d': change_7d,
-                'change_1h': change_1h,
-                'volume_24h': md.get('total_volume', {}).get('usd', 0),
-                'market_cap': md.get('market_cap', {}).get('usd', 0),
-                'pump_probability': pump_prob,
-                'trend': 'bullish' if pump_prob > 60 else 'bearish' if pump_prob < 35 else 'neutral',
+                'change_30d': change_30d,
+                'volume_24h': md.get('total_volume', {}).get('usd', 0) or 0,
+                'market_cap': md.get('market_cap', {}).get('usd', 0) or 0,
+                'market_cap_rank': coin_data.get('market_cap_rank', 0),
+                'pump_probability': pump['total'],
+                'pump_technical': pump['technical'],
+                'pump_fundamental': pump['fundamental'],
+                'pump_verdict': pump['verdict'],
+                'trend': 'bullish' if pump['total'] > 60 else 'bearish' if pump['total'] < 35 else 'neutral',
                 'rsi': rsi,
                 'macd_signal': macd['signal'],
+                'macd_histogram': macd['histogram'],
                 'bb_signal': bb['signal'],
+                'bb_position': bb['position'],
+                'bb_width': bb['width'],
+                'ichimoku_signal': ichi['signal'],
+                'ichimoku_tk': ichi['tk_cross'],
                 'ema_signal': ema_signal,
-                'volume_unusual': vol_analysis['unusual'],
-                'volume_ratio': vol_analysis['ratio'],
+                'volume_unusual': vol_a['unusual'],
+                'volume_ratio': vol_a['ratio'],
+                'volume_trend': vol_a['trend'],
+                'fundamental_score': fund['total'],
+                'fund_liquidity': fund['details']['liquidity']['score'],
+                'fund_rank': fund['details']['rank']['score'],
+                'fund_community': fund['details']['community']['score'],
+                'fund_dev': fund['details']['dev_activity']['score'],
                 'buy_zone': buy_zone,
                 'sell_zone': target1,
                 'target1': target1,
                 'target2': target2,
-                'target1_pct': 10.0,
-                'target2_pct': 20.0,
+                'target3': target3,
                 'stop_loss': stop_loss,
-                'stop_loss_pct': ((stop_loss - current_price) / current_price * 100),
+                'support': sr['support'],
+                'resistance': sr['resistance'],
             }
-
         except Exception as e:
             logger.error(f"Error analyzing {coin_id}: {e}")
             return {'error': str(e)}
 
     async def analyze_single(self, symbol: str) -> dict:
-        """Analyze by symbol (e.g. BTC -> bitcoin)"""
         symbol_map = {
-            'BTC': 'bitcoin', 'ETH': 'ethereum', 'BNB': 'binancecoin',
-            'SOL': 'solana', 'XRP': 'ripple', 'ADA': 'cardano',
-            'AVAX': 'avalanche-2', 'DOT': 'polkadot', 'LINK': 'chainlink',
-            'MATIC': 'polygon', 'NEAR': 'near', 'ARB': 'arbitrum',
-            'OP': 'optimism', 'INJ': 'injective-protocol', 'SUI': 'sui',
-            'APT': 'aptos', 'TIA': 'celestia', 'DOGE': 'dogecoin',
-            'SHIB': 'shiba-inu', 'PEPE': 'pepe', 'TON': 'toncoin',
-            'UNI': 'uniswap', 'AAVE': 'aave', 'MKR': 'maker',
+            'BTC':'bitcoin','ETH':'ethereum','BNB':'binancecoin',
+            'SOL':'solana','XRP':'ripple','ADA':'cardano',
+            'AVAX':'avalanche-2','DOT':'polkadot','LINK':'chainlink',
+            'MATIC':'polygon','NEAR':'near','ARB':'arbitrum',
+            'OP':'optimism','INJ':'injective-protocol','SUI':'sui',
+            'APT':'aptos','TIA':'celestia','DOGE':'dogecoin',
+            'SHIB':'shiba-inu','PEPE':'pepe','TON':'toncoin',
+            'UNI':'uniswap','AAVE':'aave','MKR':'maker',
+            'LDO':'lido-dao','CRV':'curve-dao-token',
+            'RENDER':'render-token','FET':'fetch-ai',
         }
         coin_id = symbol_map.get(symbol.upper(), symbol.lower())
         return await self.analyze_coin(coin_id)
 
-    async def get_top_signals(self, limit: int = 10) -> List[dict]:
-        """Scan multiple coins and return top pump signals"""
-        # Use trending + default list
+    async def get_top_signals(self, limit=10) -> List[dict]:
         trending_data = await self.get_trending()
         trending_ids = []
         if trending_data:
             trending_ids = [c['item']['id'] for c in trending_data.get('coins', [])[:7]]
-
         scan_ids = list(set(trending_ids + DEFAULT_SCAN_LIST[:25]))
-
-        # Batch fetch market data first (faster)
         market_data = await self.get_markets_batch(scan_ids[:40])
         if not market_data:
             return []
-
-        # Quick score based on market data (no heavy API calls)
         quick_scores = []
         for coin in market_data:
-            change_24h = coin.get('price_change_percentage_24h', 0) or 0
-            change_7d = coin.get('price_change_percentage_7d_in_currency', 0) or 0
-            volume = coin.get('total_volume', 0) or 0
-            market_cap = coin.get('market_cap', 1) or 1
-            vol_ratio = volume / market_cap if market_cap > 0 else 0
-
-            # Quick heuristic score
-            quick = 0
-            if -15 < change_24h < 5: quick += 30
-            if change_7d < -15: quick += 20
-            if vol_ratio > 0.05: quick += 20
-            if coin.get('price_change_percentage_1h_in_currency', 0) or 0 > 0: quick += 15
-
-            quick_scores.append((coin, quick))
-
-        # Sort and take top candidates for deep analysis
+            c24 = coin.get('price_change_percentage_24h', 0) or 0
+            c7d = coin.get('price_change_percentage_7d_in_currency', 0) or 0
+            vol = coin.get('total_volume', 0) or 0
+            mcap = coin.get('market_cap', 1) or 1
+            vr = vol / mcap
+            q = 0
+            if -15 < c24 < 5: q += 30
+            if c7d < -15: q += 20
+            if vr > 0.05: q += 20
+            if (coin.get('price_change_percentage_1h_in_currency') or 0) > 0: q += 15
+            quick_scores.append((coin, q))
         quick_scores.sort(key=lambda x: x[1], reverse=True)
-        top_candidates = [c[0] for c in quick_scores[:15]]
-
-        # Deep analysis on top candidates (limited to avoid rate limits)
-        tasks = [self.analyze_coin(c['id']) for c in top_candidates[:10]]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        valid = []
-        for r in results:
-            if isinstance(r, dict) and 'error' not in r:
-                valid.append(r)
-
+        top = [c[0] for c in quick_scores[:12]]
+        results = await asyncio.gather(*[self.analyze_coin(c['id']) for c in top[:10]], return_exceptions=True)
+        valid = [r for r in results if isinstance(r, dict) and 'error' not in r]
         valid.sort(key=lambda x: x['pump_probability'], reverse=True)
         return valid[:limit]
 
     async def get_market_news(self) -> List[dict]:
-        """Get market news from CoinGecko status updates + mock news"""
         try:
-            url = f"{COINGECKO_BASE}/news"
-            data = await self._get(url)
+            data = await self._get(f"{COINGECKO_BASE}/news")
             if data and isinstance(data, list):
-                news = []
-                for item in data[:8]:
-                    news.append({
-                        'title': item.get('title', 'No title'),
-                        'source': item.get('author', {}).get('name', 'CoinGecko') if isinstance(item.get('author'), dict) else 'CoinGecko',
-                        'url': item.get('url', 'https://coingecko.com'),
-                        'time': item.get('created_at', 'نامشخص'),
-                        'sentiment': 'neutral'
-                    })
-                return news
-        except Exception as e:
-            logger.error(f"News error: {e}")
-
+                return [{'title': i.get('title',''),'source': i.get('author',{}).get('name','CoinGecko') if isinstance(i.get('author'),dict) else 'CoinGecko','url': i.get('url','https://coingecko.com'),'time': i.get('created_at','اخیراً'),'sentiment':'neutral'} for i in data[:8]]
+        except: pass
         return [
-            {'title': 'Bitcoin consolidates above key support level', 'source': 'CoinDesk', 'url': 'https://coindesk.com', 'time': 'اخیراً', 'sentiment': 'neutral'},
-            {'title': 'Ethereum Layer 2 volumes hit new record', 'source': 'The Block', 'url': 'https://theblock.co', 'time': 'اخیراً', 'sentiment': 'positive'},
-            {'title': 'DeFi TVL reaches monthly high', 'source': 'DeFiLlama', 'url': 'https://defillama.com', 'time': 'اخیراً', 'sentiment': 'positive'},
+            {'title':'Bitcoin consolidates above key support','source':'CoinDesk','url':'https://coindesk.com','time':'اخیراً','sentiment':'neutral'},
+            {'title':'Ethereum Layer 2 volumes hit new record','source':'The Block','url':'https://theblock.co','time':'اخیراً','sentiment':'positive'},
         ]
 
     async def get_market_status(self) -> dict:
-        """Get overall market status"""
-        global_data, fg_data = await asyncio.gather(
-            self.get_global_data(),
-            self.get_fear_greed(),
-            return_exceptions=True
-        )
-
-        result = {
-            'total_market_cap': 0,
-            'btc_dominance': 0,
-            'total_volume': 0,
-            'fear_greed': 50,
-            'overall_trend': 'خنثی',
-            'gainers': 0,
-            'losers': 0,
-        }
-
-        if global_data and not isinstance(global_data, Exception):
-            gd = global_data.get('data', {})
-            result['total_market_cap'] = gd.get('total_market_cap', {}).get('usd', 0)
-            result['btc_dominance'] = gd.get('market_cap_percentage', {}).get('btc', 0)
-            result['total_volume'] = gd.get('total_volume', {}).get('usd', 0)
-            change = gd.get('market_cap_change_percentage_24h_usd', 0)
-            result['overall_trend'] = '📈 صعودی' if change > 2 else '📉 نزولی' if change < -2 else '➡️ خنثی'
-            result['gainers'] = max(0, 50 + change * 2)
+        gd, fg = await asyncio.gather(self.get_global_data(), self.get_fear_greed(), return_exceptions=True)
+        result = {'total_market_cap':0,'btc_dominance':0,'total_volume':0,'fear_greed':50,'overall_trend':'خنثی','gainers':50,'losers':50}
+        if gd and not isinstance(gd, Exception):
+            d = gd.get('data', {})
+            result['total_market_cap'] = d.get('total_market_cap',{}).get('usd',0)
+            result['btc_dominance'] = d.get('market_cap_percentage',{}).get('btc',0)
+            result['total_volume'] = d.get('total_volume',{}).get('usd',0)
+            ch = d.get('market_cap_change_percentage_24h_usd', 0)
+            result['overall_trend'] = '📈 صعودی' if ch > 2 else '📉 نزولی' if ch < -2 else '➡️ خنثی'
+            result['gainers'] = max(0, min(100, 50 + ch * 2))
             result['losers'] = 100 - result['gainers']
-
-        if fg_data and not isinstance(fg_data, Exception):
-            try:
-                result['fear_greed'] = int(fg_data['data'][0]['value'])
-            except (KeyError, IndexError, TypeError):
-                pass
-
+        if fg and not isinstance(fg, Exception):
+            try: result['fear_greed'] = int(fg['data'][0]['value'])
+            except: pass
         return result
 
     async def close(self):
