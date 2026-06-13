@@ -1,471 +1,775 @@
 #!/usr/bin/env python3
-"""Crypto Pump Signal Bot v3 - با DEX Scanner و شت‌کوین‌های جدید"""
+"""
+🚀 Ultra Crypto Pump Bot - DEX Edition
+DexScreener + Binance + همه زنجیره‌ها
+Volume + Smart Money Flow + Multi-Timeframe
+"""
 
-import asyncio
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from analyzer import CryptoAnalyzer
-from dex_scanner import DexScanner, CHAINS
-from config import BOT_TOKEN, SCAN_INTERVAL_MINUTES
+import requests
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import matplotlib.gridspec as gridspec
+from datetime import datetime
+import io, time, logging, json
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+# ==================== تنظیمات ====================
+TELEGRAM_TOKEN = "8286137689:AAEbA-vB41YSHfYj8YIe_MBeymRHqXzu7l4"
+CHAT_ID = "767354973"
+
+BINANCE_BASE   = "https://api.binance.com/api/v3"
+DEX_BASE       = "https://api.dexscreener.com/latest/dex"
+DEX_TOKEN_BASE = "https://api.dexscreener.com/latest/dex/tokens"
+
+# پارامترهای تحلیل
+VOLUME_WINDOW        = 20
+VOLUME_STD_THRESHOLD = 2.0
+SMF_WINDOW           = 10
+SCAN_INTERVAL        = 180    # هر 3 دقیقه
+PUMP_SCORE_MIN       = 62     # حداقل امتیاز
+
+# زنجیره‌های پشتیبانی‌شده در DexScreener
+CHAINS = ["solana", "ethereum", "bsc", "base", "arbitrum", "polygon", "avalanche", "ton"]
+
+# ارزهای بزرگ Binance (تحلیل دقیق‌تر با کندل)
+BINANCE_SYMBOLS = [
+    "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT",
+    "AVAXUSDT","DOTUSDT","MATICUSDT","LINKUSDT","UNIUSDT","ATOMUSDT","LTCUSDT",
+    "NEARUSDT","TRXUSDT","APTUSDT","ARBUSDT","OPUSDT","INJUSDT","SUIUSDT",
+    "PEPEUSDT","WLDUSDT","TIAUSDT","SEIUSDT","JUPUSDT","WIFUSDT","BONKUSDT",
+    "MEMEUSDT","FLOKIUSDT","1000SHIBUSDT","NOTUSDT","HMSTRUSDT",
+]
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
-analyzer = CryptoAnalyzer()
-dex = DexScanner()
 
-CANCEL_BTN = [[InlineKeyboardButton("❌ لغو", callback_data="cancel")]]
-BACK_BTN = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="main_menu")]]
+# ==================== دریافت داده Binance ====================
 
-def main_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 اسکن بازار", callback_data="scan_now"),
-         InlineKeyboardButton("🔥 برترین سیگنال‌ها", callback_data="top_signals")],
-        [InlineKeyboardButton("📊 تحلیل ارز خاص", callback_data="analyze_coin"),
-         InlineKeyboardButton("🧪 شت‌کوین‌های جدید", callback_data="dex_menu")],
-        [InlineKeyboardButton("📰 اخبار بازار", callback_data="news"),
-         InlineKeyboardButton("🌐 وضعیت بازار", callback_data="status")],
-        [InlineKeyboardButton("⚙️ هشدار خودکار", callback_data="set_alert"),
-         InlineKeyboardButton("❓ راهنما", callback_data="help")],
-    ])
+def get_klines(symbol, interval="1d", limit=50):
+    try:
+        r = requests.get(f"{BINANCE_BASE}/klines",
+                         params={"symbol": symbol, "interval": interval, "limit": limit},
+                         timeout=10)
+        r.raise_for_status()
+        df = pd.DataFrame(r.json(), columns=[
+            "open_time","open","high","low","close","volume",
+            "close_time","quote_volume","trades","taker_buy_base","taker_buy_quote","ignore"])
+        for c in ["open","high","low","close","volume"]:
+            df[c] = df[c].astype(float)
+        df["date"] = pd.to_datetime(df["open_time"], unit="ms")
+        return df
+    except:
+        return None
 
-def cancel_keyboard():
-    return InlineKeyboardMarkup(CANCEL_BTN)
+def get_ticker_24h(symbol):
+    try:
+        r = requests.get(f"{BINANCE_BASE}/ticker/24hr", params={"symbol": symbol}, timeout=10)
+        return r.json()
+    except:
+        return {}
 
-def back_keyboard():
-    return InlineKeyboardMarkup(BACK_BTN)
+# ==================== دریافت داده DexScreener ====================
 
-def dex_chain_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("☀️ Solana", callback_data="dex_solana"),
-         InlineKeyboardButton("🟡 BSC", callback_data="dex_bsc")],
-        [InlineKeyboardButton("🔷 Ethereum", callback_data="dex_ethereum"),
-         InlineKeyboardButton("🔵 Base", callback_data="dex_base")],
-        [InlineKeyboardButton("🔵 Arbitrum", callback_data="dex_arbitrum"),
-         InlineKeyboardButton("🌐 همه شبکه‌ها", callback_data="dex_all")],
-        [InlineKeyboardButton("❌ لغو", callback_data="cancel")],
-    ])
-
-# ── Commands ───────────────────────────────────────────────────────────────────
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 *ربات سیگنال کریپتو v3*\n\n"
-        "✅ تحلیل تکنیکال: RSI، MACD، Bollinger، Ichimoku، EMA\n"
-        "✅ تحلیل فاندامنتال: مارکت‌کپ، کامیونیتی، توسعه\n"
-        "✅ شت‌کوین‌های جدید DEX: Solana، BSC، ETH، Base\n"
-        "✅ لینک خرید و آدرس قرارداد\n\n"
-        "⚠️ _مشاوره مالی نیست. با دقت استفاده کن._",
-        parse_mode='Markdown', reply_markup=main_keyboard())
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "📋 *دستورات:*\n\n"
-        "🔹 *بازار اصلی:*\n"
-        "/scan — اسکن بازار\n"
-        "/top — برترین سیگنال‌ها\n"
-        "/coin BTC — تحلیل ارز\n"
-        "/status — وضعیت بازار\n"
-        "/news — اخبار\n\n"
-        "🔹 *شت‌کوین DEX:*\n"
-        "/dex — اسکن توکن‌های جدید\n"
-        "/dextoken <address> — تحلیل توکن\n\n"
-        "🔹 *هشدار:*\n"
-        "/alert ETH 70 — هشدار پامپ\n"
-        "/alerts — هشدارهای من\n"
-        "/cancelalerts — حذف هشدارها\n\n"
-        "/cancel — لغو عملیات"
-    )
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=back_keyboard())
-
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text("✅ لغو شد.", reply_markup=main_keyboard())
-
-async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⏳ در حال اسکن بازار...", reply_markup=cancel_keyboard())
-    signals = await analyzer.get_top_signals(limit=10)
-    await msg.edit_text(format_signals(signals), parse_mode='Markdown', reply_markup=back_keyboard())
-
-async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⏳ در حال جمع‌آوری سیگنال‌ها...", reply_markup=cancel_keyboard())
-    signals = await analyzer.get_top_signals(limit=10)
-    await msg.edit_text(format_signals(signals), parse_mode='Markdown', reply_markup=back_keyboard())
-
-async def coin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❗ مثال: `/coin BTC`", parse_mode='Markdown', reply_markup=back_keyboard())
-        return
-    symbol = context.args[0].upper()
-    msg = await update.message.reply_text(f"⏳ تحلیل *{symbol}*...", parse_mode='Markdown', reply_markup=cancel_keyboard())
-    result = await analyzer.analyze_single(symbol)
-    await msg.edit_text(format_full_analysis(result), parse_mode='Markdown', reply_markup=back_keyboard())
-
-async def dex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🧪 *اسکن شت‌کوین‌های جدید DEX*\n\nکدام شبکه؟",
-        parse_mode='Markdown', reply_markup=dex_chain_keyboard())
-
-async def dextoken_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❗ مثال: `/dextoken <address>`", parse_mode='Markdown')
-        return
-    query = " ".join(context.args)
-    msg = await update.message.reply_text("⏳ در حال جستجو...", reply_markup=cancel_keyboard())
-    pairs = await dex.search_token(query)
-    if not pairs:
-        await msg.edit_text("❌ توکنی یافت نشد.", reply_markup=back_keyboard())
-        return
-    pair = pairs[0]
-    pump_info = dex.calc_shitcoin_pump_score(pair)
-    await msg.edit_text(format_dex_token(pair, pump_info), parse_mode='Markdown',
-                        disable_web_page_preview=True, reply_markup=back_keyboard())
-
-async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        await update.message.reply_text("❗ فرمت: `/alert ETH 65`", parse_mode='Markdown', reply_markup=back_keyboard())
-        return
-    symbol = context.args[0].upper()
-    try: threshold = float(context.args[1])
-    except ValueError:
-        await update.message.reply_text("❗ درصد باید عدد باشد.", reply_markup=back_keyboard())
-        return
-    chat_id = update.message.chat_id
-    if 'alerts' not in context.bot_data:
-        context.bot_data['alerts'] = {}
-    context.bot_data['alerts'].setdefault(chat_id, [])
-    context.bot_data['alerts'][chat_id].append({'symbol': symbol, 'threshold': threshold})
-    await update.message.reply_text(
-        f"✅ هشدار ثبت شد!\n💎 *{symbol}* — حداقل *{threshold}%*",
-        parse_mode='Markdown', reply_markup=back_keyboard())
-
-async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    alerts = context.bot_data.get('alerts', {}).get(chat_id, [])
-    if not alerts:
-        await update.message.reply_text("📭 هیچ هشداری ندارید.\nمثال: `/alert BTC 70`", parse_mode='Markdown', reply_markup=back_keyboard())
-        return
-    text = "🔔 *هشدارهای فعال:*\n\n"
-    for i, a in enumerate(alerts, 1):
-        text += f"{i}. *{a['symbol']}* — {a['threshold']}%\n"
-    text += "\n/cancelalerts — حذف همه"
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=back_keyboard())
-
-async def cancel_alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    if 'alerts' in context.bot_data:
-        context.bot_data['alerts'].pop(chat_id, None)
-    await update.message.reply_text("✅ تمام هشدارها حذف شدند.", reply_markup=main_keyboard())
-
-async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⏳ در حال دریافت اخبار...", reply_markup=cancel_keyboard())
-    news = await analyzer.get_market_news()
-    await msg.edit_text(format_news(news), parse_mode='Markdown', reply_markup=back_keyboard())
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⏳ در حال بررسی بازار...", reply_markup=cancel_keyboard())
-    status = await analyzer.get_market_status()
-    await msg.edit_text(format_market_status(status), parse_mode='Markdown', reply_markup=back_keyboard())
-
-# ── Callbacks ──────────────────────────────────────────────────────────────────
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data == "cancel":
-        context.user_data.clear()
-        await query.edit_message_text("✅ لغو شد.", reply_markup=main_keyboard())
-
-    elif data == "main_menu":
-        await query.edit_message_text("🤖 *منوی اصلی:*", parse_mode='Markdown', reply_markup=main_keyboard())
-
-    elif data == "scan_now":
-        await query.edit_message_text("⏳ در حال اسکن بازار...", reply_markup=cancel_keyboard())
-        signals = await analyzer.get_top_signals(limit=10)
-        await query.edit_message_text(format_signals(signals), parse_mode='Markdown', reply_markup=back_keyboard())
-
-    elif data == "top_signals":
-        await query.edit_message_text("⏳ در حال جمع‌آوری سیگنال‌ها...", reply_markup=cancel_keyboard())
-        signals = await analyzer.get_top_signals(limit=10)
-        await query.edit_message_text(format_signals(signals), parse_mode='Markdown', reply_markup=back_keyboard())
-
-    elif data == "analyze_coin":
-        await query.edit_message_text(
-            "📊 دستور زیر را ارسال کن:\n\n`/coin BTC`\n`/coin ETH`\n`/coin SOL`",
-            parse_mode='Markdown', reply_markup=cancel_keyboard())
-
-    elif data == "dex_menu":
-        await query.edit_message_text(
-            "🧪 *اسکن شت‌کوین‌های جدید DEX*\n\nکدام شبکه؟",
-            parse_mode='Markdown', reply_markup=dex_chain_keyboard())
-
-    elif data.startswith("dex_"):
-        chain = data.replace("dex_", "")
-        chain_name = "همه شبکه‌ها" if chain == "all" else CHAINS.get(chain, chain)
-        await query.edit_message_text(
-            f"⏳ در حال اسکن توکن‌های جدید روی *{chain_name}*...\n\n_این ممکنه ۱۵-۳۰ ثانیه طول بکشه_",
-            parse_mode='Markdown', reply_markup=cancel_keyboard())
-        tokens = await dex.get_top_new_pumps(chain=chain, limit=8)
-        text = format_dex_list(tokens, chain_name)
-        await query.edit_message_text(text, parse_mode='Markdown',
-                                      disable_web_page_preview=True, reply_markup=back_keyboard())
-
-    elif data == "news":
-        await query.edit_message_text("⏳ در حال دریافت اخبار...", reply_markup=cancel_keyboard())
-        news = await analyzer.get_market_news()
-        await query.edit_message_text(format_news(news), parse_mode='Markdown', reply_markup=back_keyboard())
-
-    elif data == "status":
-        await query.edit_message_text("⏳ در حال بررسی بازار...", reply_markup=cancel_keyboard())
-        status = await analyzer.get_market_status()
-        await query.edit_message_text(format_market_status(status), parse_mode='Markdown', reply_markup=back_keyboard())
-
-    elif data == "set_alert":
-        await query.edit_message_text(
-            "🔔 *تنظیم هشدار:*\n\n`/alert SYMBOL PERCENT`\n\nمثال:\n`/alert BTC 75`",
-            parse_mode='Markdown', reply_markup=cancel_keyboard())
-
-    elif data == "help":
-        text = (
-            "📋 *دستورات:*\n\n"
-            "/scan /top /coin BTC\n"
-            "/dex — شت‌کوین‌های جدید\n"
-            "/dextoken <address>\n"
-            "/alert ETH 70\n"
-            "/alerts /cancelalerts\n"
-            "/news /status /cancel"
-        )
-        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=back_keyboard())
-
-# ── Formatters ─────────────────────────────────────────────────────────────────
-
-def pump_bar(prob):
-    filled = int(prob / 10)
-    return "█" * filled + "░" * (10 - filled)
-
-def macd_text(sig):
-    return {'bullish_strong':'🟢 صعودی قوی','bullish':'🟢 صعودی',
-            'neutral':'⚪ خنثی','bearish':'🔴 نزولی','bearish_strong':'🔴 نزولی قوی'}.get(sig, sig)
-
-def bb_text(sig):
-    return {'strong_oversold':'🟢 اشباع فروش شدید','oversold':'🟢 اشباع فروش',
-            'neutral':'⚪ خنثی','overbought':'🔴 اشباع خرید','strong_overbought':'🔴 اشباع خرید شدید'}.get(sig, sig)
-
-def ichi_text(sig):
-    return {'above_cloud':'☁️ بالای ابر ✅','below_cloud':'☁️ زیر ابر ❌',
-            'inside_cloud':'☁️ داخل ابر','neutral':'⚪ خنثی'}.get(sig, sig)
-
-def format_signals(signals):
-    if not signals:
-        return "❌ سیگنالی یافت نشد."
-    text = "🔥 *برترین سیگنال‌های پامپ*\n" + "─"*28 + "\n\n"
-    for i, s in enumerate(signals[:10], 1):
-        p = s['pump_probability']
-        em = "🚀" if p >= 75 else "📈" if p >= 60 else "🔶"
-        text += f"{em} *{i}. {s['symbol']}* — {s['name']}\n"
-        text += f"   💰 `${s['price']:,.4f}` | {s['change_24h']:+.1f}%\n"
-        text += f"   🎯 `[{pump_bar(p)}] {p:.1f}%` — {s['pump_verdict']}\n"
-        text += f"   🟢 ورود: `${s['buy_zone']:,.4f}` 🔴 هدف: `${s['target1']:,.4f}`\n"
-        text += f"   🔗 [CoinGecko](https://www.coingecko.com/en/coins/{s.get('id','')})\n\n"
-    text += "─"*28 + "\n⚠️ _مشاوره مالی نیست._"
-    return text
-
-def format_full_analysis(s):
-    if 'error' in s:
-        return f"❌ خطا: {s['error']}"
-    p = s['pump_probability']
-    text = f"📊 *تحلیل کامل {s['symbol']}* (#{s.get('market_cap_rank','?')})\n" + "─"*28 + "\n\n"
-    text += f"💰 *قیمت:* `${s['price']:,.6f}`\n"
-    text += f"📈 `{s['change_1h']:+.2f}%` (۱h) | `{s['change_24h']:+.2f}%` (۲۴h) | `{s['change_7d']:+.2f}%` (۷d)\n\n"
-    text += f"🎯 *نتیجه نهایی:*\n`[{pump_bar(p)}] {p:.1f}%`\n"
-    text += f"حکم: *{s['pump_verdict']}*\n"
-    text += f"• تکنیکال: `{s['pump_technical']:.1f}/60` | فاندامنتال: `{s['pump_fundamental']:.1f}/40`\n\n"
-    rsi = s['rsi']
-    rsi_lbl = '🟢 اشباع فروش' if rsi < 30 else '🔴 اشباع خرید' if rsi > 70 else '⚪ خنثی'
-    text += "📐 *تکنیکال:*\n"
-    text += f"• RSI: `{rsi:.1f}` {rsi_lbl}\n"
-    text += f"• MACD: {macd_text(s['macd_signal'])}\n"
-    text += f"• Bollinger: {bb_text(s['bb_signal'])} (`{s['bb_position']:.0f}%`)\n"
-    text += f"• Ichimoku: {ichi_text(s['ichimoku_signal'])} | TK: `{'صعودی✅' if s['ichimoku_tk']=='bullish' else 'نزولی❌' if s['ichimoku_tk']=='bearish' else 'خنثی'}`\n"
-    text += f"• EMA: {s['ema_signal']} | حجم: `x{s['volume_ratio']:.1f}` {'🔥' if s['volume_unusual'] else ''}\n\n"
-    text += "🏦 *فاندامنتال:*\n"
-    text += f"• کل: `{s['fundamental_score']}/100` | نقدینگی: `{s['fund_liquidity']}/25`\n"
-    text += f"• کامیونیتی: `{s['fund_community']}/25` | توسعه: `{s['fund_dev']}/25`\n\n"
-    text += "🎯 *نقاط معاملاتی:*\n"
-    text += f"🟢 ورود: `${s['buy_zone']:,.6f}`\n"
-    text += f"🔴 هدف ۱: `${s['target1']:,.6f}` (+10%) | هدف ۲: `${s['target2']:,.6f}` (+22%)\n"
-    text += f"⛔ استاپ: `${s['stop_loss']:,.6f}`\n\n"
-    text += f"🔗 [CoinGecko](https://www.coingecko.com/en/coins/{s.get('id','')}) | [TradingView](https://www.tradingview.com/chart/?symbol={s['symbol']}USDT)\n\n"
-    text += "─"*28 + "\n⚠️ _مشاوره مالی نیست._"
-    return text
-
-def format_dex_list(tokens, chain_name):
-    if not tokens:
-        return f"❌ توکن جدید قابل توجهی روی {chain_name} یافت نشد.\n\nدوباره امتحان کن یا شبکه دیگری انتخاب کن."
-    text = f"🧪 *شت‌کوین‌های جدید — {chain_name}*\n" + "─"*28 + "\n\n"
-    for i, token in enumerate(tokens, 1):
-        base = token.get('baseToken') or {}
-        pump_info = token.get('pump_info', {})
-        score = pump_info.get('score', 0)
-        em = "🚀" if score >= 75 else "📈" if score >= 55 else "🔶"
-        name = base.get('name', 'Unknown')[:20]
-        symbol = base.get('symbol', '?')
-        address = base.get('address', '')
-        chain = token.get('chainId', '')
-        price = token.get('priceUsd', '0')
-        ch_1h = float((token.get('priceChange') or {}).get('h1', 0) or 0)
-        ch_24h = float((token.get('priceChange') or {}).get('h24', 0) or 0)
-        vol = float((token.get('volume') or {}).get('h24', 0) or 0)
-        liq = float((token.get('liquidity') or {}).get('usd', 0) or 0)
-        age = pump_info.get('age_hours', 0)
-        buy_link = dex.get_buy_link(chain, address)
-        explorer_link = dex.get_explorer_link(chain, address)
-        dex_url = token.get('url', f"https://dexscreener.com/{chain}/{address}")
-
-        text += f"{em} *{i}. {symbol}* — {name}\n"
-        text += f"   💰 `${float(price):.8f}` | {ch_1h:+.1f}% (1h) | {ch_24h:+.1f}% (24h)\n"
-        text += f"   🎯 امتیاز پامپ: `[{pump_bar(score)}] {score}/100`\n"
-        text += f"   📦 حجم: `${vol:,.0f}` | 💧 نقدینگی: `${liq:,.0f}`\n"
-        text += f"   ⏱ سن: `{age:.1f} ساعت`\n"
-        text += f"   🛒 فشار خرید: `{pump_info.get('buy_pressure_pct',0):.0f}%`\n"
-
-        if pump_info.get('risks'):
-            text += f"   ⚠️ ریسک: `{' | '.join(pump_info['risks'])}`\n"
-
-        # آدرس قرارداد
-        short_addr = f"{address[:6]}...{address[-4:]}" if len(address) > 10 else address
-        text += f"   📋 CA: `{address}`\n"
-
-        # لینک‌ها
-        links = f"[DexScreener]({dex_url})"
-        if explorer_link: links += f" | [Explorer]({explorer_link})"
-        if buy_link: links += f" | [🛒 خرید]({buy_link})"
-        text += f"   🔗 {links}\n\n"
-
-    text += "─"*28 + "\n"
-    text += "⚠️ _شت‌کوین‌ها ریسک بسیار بالا دارند.\nمشاوره مالی نیست._"
-    return text
-
-def format_dex_token(pair, pump_info):
-    base = pair.get('baseToken') or {}
-    chain = pair.get('chainId', '')
-    address = base.get('address', '')
-    name = base.get('name', 'Unknown')
-    symbol = base.get('symbol', '?')
-    price = float(pair.get('priceUsd', 0) or 0)
-    score = pump_info.get('score', 0)
-    ch_1h = float((pair.get('priceChange') or {}).get('h1', 0) or 0)
-    ch_6h = float((pair.get('priceChange') or {}).get('h6', 0) or 0)
-    ch_24h = float((pair.get('priceChange') or {}).get('h24', 0) or 0)
-    vol = float((pair.get('volume') or {}).get('h24', 0) or 0)
-    liq = float((pair.get('liquidity') or {}).get('usd', 0) or 0)
-    mcap = float(pair.get('marketCap', 0) or 0)
-    buy_link = dex.get_buy_link(chain, address)
-    explorer_link = dex.get_explorer_link(chain, address)
-    dex_url = pair.get('url', f"https://dexscreener.com/{chain}/{address}")
-
-    text = f"🧪 *تحلیل توکن: {symbol}*\n" + "─"*28 + "\n\n"
-    text += f"📌 نام: *{name}*\n"
-    text += f"🔗 شبکه: `{chain.upper()}`\n"
-    text += f"💰 قیمت: `${price:.10f}`\n"
-    text += f"📈 تغییرات: `{ch_1h:+.1f}%` (1h) | `{ch_6h:+.1f}%` (6h) | `{ch_24h:+.1f}%` (24h)\n\n"
-
-    text += f"🎯 *امتیاز پامپ: `[{pump_bar(score)}] {score}/100`*\n"
-    text += f"حکم: *{pump_info.get('verdict', '')}*\n\n"
-
-    text += "📊 *آمار بازار:*\n"
-    text += f"• حجم ۲۴h: `${vol:,.0f}`\n"
-    text += f"• نقدینگی: `${liq:,.0f}`\n"
-    if mcap: text += f"• مارکت‌کپ: `${mcap:,.0f}`\n"
-    text += f"• سن: `{pump_info.get('age_hours', 0):.1f} ساعت`\n"
-    text += f"• خرید/فروش (۱h): `{pump_info.get('buys_1h',0)} / {pump_info.get('sells_1h',0)}`\n"
-    text += f"• فشار خرید: `{pump_info.get('buy_pressure_pct',0):.0f}%`\n\n"
-
-    if pump_info.get('risks'):
-        text += f"⚠️ *ریسک‌ها:* {' | '.join(pump_info['risks'])}\n\n"
-
-    text += f"📋 *آدرس قرارداد:*\n`{address}`\n\n"
-    text += "🔗 *لینک‌ها:*\n"
-    text += f"[DexScreener]({dex_url})"
-    if explorer_link: text += f" | [Explorer]({explorer_link})"
-    if buy_link: text += f"\n[🛒 خرید مستقیم]({buy_link})"
-    text += "\n\n─"*28 + "\n⚠️ _ریسک بسیار بالا. مشاوره مالی نیست._"
-    return text
-
-def format_news(news):
-    if not news: return "❌ اخباری یافت نشد."
-    text = "📰 *اخبار بازار*\n" + "─"*28 + "\n\n"
-    for item in news[:8]:
-        em = "🟢" if item['sentiment']=='positive' else "🔴" if item['sentiment']=='negative' else "⚪"
-        text += f"{em} *{item['title'][:55]}...*\n   {item['source']} | 🔗 [بیشتر]({item['url']})\n\n"
-    return text
-
-def format_market_status(s):
-    fg = s['fear_greed']
-    em = "😱" if fg < 25 else "😨" if fg < 45 else "😐" if fg < 55 else "😊" if fg < 75 else "🤑"
-    text = "🌐 *وضعیت کلی بازار*\n" + "─"*28 + "\n\n"
-    text += f"💰 مارکت کپ: `${s['total_market_cap']:,.0f}`\n"
-    text += f"📊 سهم BTC: `{s['btc_dominance']:.1f}%`\n"
-    text += f"💧 حجم ۲۴h: `${s['total_volume']:,.0f}`\n"
-    text += f"{em} ترس/طمع: `{fg}/100`\n"
-    text += f"📈 روند: {s['overall_trend']}\n"
-    return text
-
-# ── Alert Job ──────────────────────────────────────────────────────────────────
-
-async def check_alerts(context: ContextTypes.DEFAULT_TYPE):
-    if 'alerts' not in context.bot_data:
-        return
-    if 'alerted' not in context.bot_data:
-        context.bot_data['alerted'] = {}
-    import time
-    now = time.time()
-    for chat_id, alert_list in list(context.bot_data['alerts'].items()):
-        for alert in alert_list:
-            key = f"{chat_id}_{alert['symbol']}"
-            last = context.bot_data['alerted'].get(key, 0)
-            if now - last < 3600:  # هر ۱ ساعت یک بار
+def get_dex_trending():
+    """دریافت توکن‌های ترند از DexScreener"""
+    tokens = []
+    try:
+        # جستجوی ترند برای هر زنجیره
+        for chain in CHAINS:
+            try:
+                r = requests.get(f"{DEX_BASE}/search?q=pump", timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    pairs = data.get("pairs", []) or []
+                    for p in pairs:
+                        if p.get("chainId") == chain:
+                            tokens.append(p)
+                time.sleep(0.2)
+            except:
                 continue
-            result = await analyzer.analyze_single(alert['symbol'])
-            if 'error' not in result and result['pump_probability'] >= alert['threshold']:
-                context.bot_data['alerted'][key] = now
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🚨 *هشدار پامپ!*\n\n"
-                         f"*{alert['symbol']}* — احتمال `{result['pump_probability']:.1f}%`\n"
-                         f"حکم: {result['pump_verdict']}\n\n"
-                         f"💰 `${result['price']:,.4f}`\n"
-                         f"🟢 ورود: `${result['buy_zone']:,.4f}`\n"
-                         f"🔴 هدف: `${result['target1']:,.4f}`\n\n"
-                         f"⚠️ _مشاوره مالی نیست._",
-                    parse_mode='Markdown')
+    except:
+        pass
+    return tokens
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+def get_dex_boosted():
+    """توکن‌های boosted (تبلیغ‌شده و پرحجم)"""
+    try:
+        r = requests.get("https://api.dexscreener.com/token-boosts/top/v1", timeout=10)
+        if r.status_code == 200:
+            return r.json() or []
+    except:
+        pass
+    return []
 
-def main():
-    if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ BOT_TOKEN را تنظیم کنید!")
-        return
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("cancel", cancel_command))
-    app.add_handler(CommandHandler("scan", scan_command))
-    app.add_handler(CommandHandler("top", top_command))
-    app.add_handler(CommandHandler("coin", coin_command))
-    app.add_handler(CommandHandler("dex", dex_command))
-    app.add_handler(CommandHandler("dextoken", dextoken_command))
-    app.add_handler(CommandHandler("alert", alert_command))
-    app.add_handler(CommandHandler("alerts", alerts_command))
-    app.add_handler(CommandHandler("cancelalerts", cancel_alerts_command))
-    app.add_handler(CommandHandler("news", news_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.job_queue.run_repeating(check_alerts, interval=SCAN_INTERVAL_MINUTES * 60, first=60)
-    print("✅ ربات v3 در حال اجرا...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+def get_dex_new_tokens():
+    """توکن‌های جدید با حجم بالا"""
+    results = []
+    try:
+        for chain in CHAINS[:4]:  # فقط زنجیره‌های اصلی
+            r = requests.get(f"https://api.dexscreener.com/token-profiles/latest/v1", timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list):
+                    results.extend([d for d in data if d.get("chainId") == chain])
+            time.sleep(0.2)
+    except:
+        pass
+    return results
+
+def get_pair_details(pair_address, chain):
+    """جزئیات کامل یک جفت معاملاتی"""
+    try:
+        r = requests.get(f"{DEX_BASE}/pairs/{chain}/{pair_address}", timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            pairs = data.get("pairs", [])
+            return pairs[0] if pairs else None
+    except:
+        return None
+
+def search_dex_token(query):
+    """جستجوی توکن در DexScreener"""
+    try:
+        r = requests.get(f"{DEX_BASE}/search?q={query}", timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            pairs = data.get("pairs", []) or []
+            # فیلتر: حجم بالا و liquidity کافی
+            filtered = [p for p in pairs
+                       if float(p.get("volume", {}).get("h24", 0) or 0) > 50000
+                       and float(p.get("liquidity", {}).get("usd", 0) or 0) > 10000]
+            filtered.sort(key=lambda x: float(x.get("volume", {}).get("h24", 0) or 0), reverse=True)
+            return filtered[:3]
+    except:
+        pass
+    return []
+
+# ==================== محاسبات تحلیلی ====================
+
+def calculate_smart_money_flow(df):
+    hl = (df["high"] - df["low"]).replace(0, 0.0001)
+    smf = ((df["close"] - df["low"]) / hl) * df["volume"]
+    return smf.rolling(SMF_WINDOW).mean() / df["volume"].rolling(SMF_WINDOW).mean() * 100
+
+def calculate_volume_analysis(df):
+    vol_mean  = df["volume"].rolling(VOLUME_WINDOW).mean()
+    vol_std   = df["volume"].rolling(VOLUME_WINDOW).std()
+    vol_z     = (df["volume"] - vol_mean) / vol_std
+    low_thr   = vol_mean - VOLUME_STD_THRESHOLD * vol_std
+    return vol_mean, vol_std, vol_z, low_thr
+
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain  = delta.clip(lower=0).rolling(period).mean()
+    loss  = (-delta.clip(upper=0)).rolling(period).mean()
+    rs    = gain / loss.replace(0, 0.0001)
+    return 100 - (100 / (1 + rs))
+
+def calculate_pump_score_binance(df, ticker):
+    """امتیاز پامپ برای ارزهای Binance"""
+    score = 0
+    signals = []
+    risk_factors = []
+
+    if len(df) < VOLUME_WINDOW + 5:
+        return 0, [], [], 50
+
+    vol_mean, vol_std, vol_z, _ = calculate_volume_analysis(df)
+    smf     = calculate_smart_money_flow(df)
+    rsi     = calculate_rsi(df["close"])
+    last_z  = vol_z.iloc[-1]
+    last_smf = smf.iloc[-1] if not pd.isna(smf.iloc[-1]) else 50
+    last_rsi = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50
+
+    price_change_24h = float(ticker.get("priceChangePercent", 0))
+    volume_24h       = float(ticker.get("quoteVolume", 0))
+
+    # --- امتیازدهی ---
+    # 1. حجم (30pt)
+    if last_z > 3:
+        score += 30; signals.append(f"🔥 حجم انفجاری (z={last_z:.1f})")
+    elif last_z > 2:
+        score += 22; signals.append(f"📈 حجم بالا (z={last_z:.1f})")
+    elif last_z > 1.5:
+        score += 14; signals.append(f"📊 حجم بالاتر از معمول")
+
+    # 2. Smart Money (20pt)
+    if last_smf > 72:
+        score += 20; signals.append(f"💰 Smart Money قوی ({last_smf:.1f})")
+    elif last_smf > 58:
+        score += 12; signals.append(f"💰 Smart Money مثبت ({last_smf:.1f})")
+
+    # 3. RSI (15pt)
+    if 45 < last_rsi < 65:
+        score += 15; signals.append(f"📐 RSI ایده‌آل ({last_rsi:.0f})")
+    elif 35 < last_rsi <= 45:
+        score += 10; signals.append(f"📐 RSI در ناحیه خرید ({last_rsi:.0f})")
+    elif last_rsi > 75:
+        score -= 10; risk_factors.append(f"⚠️ RSI اشباع خرید ({last_rsi:.0f})")
+
+    # 4. تغییر قیمت (20pt)
+    if 3 < price_change_24h < 20:
+        score += 20; signals.append(f"💹 رشد قیمت: +{price_change_24h:.1f}%")
+    elif 1 < price_change_24h <= 3:
+        score += 10; signals.append(f"💹 رشد قیمت: +{price_change_24h:.1f}%")
+    elif price_change_24h < -8:
+        score -= 15; risk_factors.append(f"📉 افت شدید: {price_change_24h:.1f}%")
+
+    # 5. مومنتوم قیمت (15pt)
+    if len(df) >= 5:
+        momentum = (df["close"].iloc[-1] / df["close"].iloc[-5] - 1) * 100
+        if momentum > 5:
+            score += 15; signals.append(f"🚀 مومنتوم 5 روزه: +{momentum:.1f}%")
+        elif momentum > 2:
+            score += 8; signals.append(f"📈 مومنتوم مثبت: +{momentum:.1f}%")
+
+    # --- محاسبه ریسک ---
+    risk = 50
+    if last_rsi > 70: risk += 20
+    if last_z > 3: risk += 10
+    if price_change_24h > 15: risk += 15
+    if volume_24h < 1_000_000: risk += 10
+    if len(risk_factors) > 0: risk += 10 * len(risk_factors)
+    risk = min(max(risk, 10), 95)
+
+    return min(score, 100), signals, risk_factors, risk
+
+def calculate_pump_score_dex(pair):
+    """امتیاز پامپ برای توکن‌های DEX"""
+    score = 0
+    signals = []
+    risk_factors = []
+
+    try:
+        vol_h1  = float(pair.get("volume", {}).get("h1", 0) or 0)
+        vol_h6  = float(pair.get("volume", {}).get("h6", 0) or 0)
+        vol_h24 = float(pair.get("volume", {}).get("h24", 0) or 0)
+        liq     = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+        mc      = float(pair.get("marketCap", 0) or 0)
+        p1h     = float(pair.get("priceChange", {}).get("h1", 0) or 0)
+        p6h     = float(pair.get("priceChange", {}).get("h6", 0) or 0)
+        p24h    = float(pair.get("priceChange", {}).get("h24", 0) or 0)
+        txns_h1 = pair.get("txns", {}).get("h1", {})
+        buys_h1 = int(txns_h1.get("buys", 0) or 0)
+        sells_h1= int(txns_h1.get("sells", 0) or 0)
+
+        # 1. رشد حجم (25pt)
+        if vol_h24 > 0:
+            vol_accel = (vol_h1 * 24) / vol_h24  # شتاب حجم
+            if vol_accel > 3:
+                score += 25; signals.append(f"🔥 شتاب حجم: {vol_accel:.1f}x")
+            elif vol_accel > 2:
+                score += 18; signals.append(f"📈 رشد حجم: {vol_accel:.1f}x")
+            elif vol_accel > 1.5:
+                score += 10; signals.append(f"📊 حجم در حال رشد")
+
+        # 2. نسبت buy/sell (20pt)
+        total_txns = buys_h1 + sells_h1
+        if total_txns > 0:
+            buy_ratio = buys_h1 / total_txns
+            if buy_ratio > 0.7:
+                score += 20; signals.append(f"💚 فشار خرید: {buy_ratio*100:.0f}%")
+            elif buy_ratio > 0.6:
+                score += 12; signals.append(f"💚 خریداران غالب: {buy_ratio*100:.0f}%")
+            elif buy_ratio < 0.4:
+                risk_factors.append(f"🔴 فشار فروش: {(1-buy_ratio)*100:.0f}%")
+
+        # 3. تغییر قیمت (25pt)
+        if 5 < p1h < 30:
+            score += 25; signals.append(f"🚀 پامپ 1h: +{p1h:.1f}%")
+        elif 2 < p1h <= 5:
+            score += 15; signals.append(f"📈 رشد 1h: +{p1h:.1f}%")
+        if p6h > 10:
+            score += 10; signals.append(f"📈 رشد 6h: +{p6h:.1f}%")
+
+        # 4. نقدینگی کافی (15pt)
+        if liq > 500_000:
+            score += 15; signals.append(f"💧 نقدینگی بالا: ${liq:,.0f}")
+        elif liq > 100_000:
+            score += 8; signals.append(f"💧 نقدینگی متوسط: ${liq:,.0f}")
+        elif liq < 20_000:
+            risk_factors.append(f"⚠️ نقدینگی پایین: ${liq:,.0f}")
+
+        # 5. نسبت حجم به مارکت‌کپ (15pt)
+        if mc > 0:
+            vol_mc = vol_h24 / mc
+            if vol_mc > 0.5:
+                score += 15; signals.append(f"⚡ حجم/MC: {vol_mc:.2f} (بسیار بالا)")
+            elif vol_mc > 0.2:
+                score += 8; signals.append(f"⚡ حجم/MC: {vol_mc:.2f}")
+
+        # --- ریسک ---
+        risk = 50
+        if liq < 50_000: risk += 25
+        if mc > 0 and mc < 100_000: risk += 20
+        if p1h > 50: risk += 30; risk_factors.append(f"⚠️ پامپ شدید {p1h:.0f}% (احتمال دامپ)")
+        if p24h < -10: risk += 15
+        if buys_h1 + sells_h1 < 10: risk += 20; risk_factors.append("⚠️ تعداد تراکنش کم")
+        risk = min(max(risk, 15), 95)
+
+        return min(score, 100), signals, risk_factors, risk
+
+    except Exception as e:
+        logger.error(f"خطا در محاسبه امتیاز DEX: {e}")
+        return 0, [], [], 80
+
+# ==================== رسم چارت ====================
+
+def create_binance_chart(symbol, df_1d, df_4h, ticker):
+    """چارت حرفه‌ای با دو تایم‌فریم"""
+    fig = plt.figure(figsize=(16, 12), facecolor='#0d1117')
+    gs = gridspec.GridSpec(3, 2, height_ratios=[3, 2, 2], hspace=0.08, wspace=0.3)
+
+    vol_mean, _, vol_z, low_thr = calculate_volume_analysis(df_1d)
+    smf_1d = calculate_smart_money_flow(df_1d)
+    smf_4h = calculate_smart_money_flow(df_4h) if df_4h is not None else None
+    rsi_1d = calculate_rsi(df_1d["close"])
+
+    def draw_candles(ax, df, title):
+        ax.set_facecolor('#0d1117')
+        x = range(len(df))
+        for i in x:
+            o,h,l,c = df["open"].iloc[i],df["high"].iloc[i],df["low"].iloc[i],df["close"].iloc[i]
+            col = '#26a69a' if c >= o else '#ef5350'
+            ax.plot([i,i],[l,h], color=col, linewidth=0.8)
+            ax.add_patch(plt.Rectangle((i-0.3, min(o,c)), 0.6, abs(c-o), color=col, alpha=0.9))
+        cp = float(ticker.get("lastPrice", df["close"].iloc[-1]))
+        ax.axhline(y=cp, color='#00e5ff', linestyle='--', linewidth=0.8, alpha=0.7)
+        ax.annotate(f'{cp:.5g}', xy=(len(df)-1, cp), fontsize=7, color='white',
+                   bbox=dict(boxstyle='round,pad=0.2', facecolor='#00e5ff', alpha=0.85, edgecolor='none'), ha='right')
+        ax.set_title(title, color='white', fontsize=9, pad=4)
+        ax.set_ylabel('Price', color='#666', fontsize=7)
+        ax.tick_params(colors='#666', labelsize=6)
+        for sp in ax.spines.values(): sp.set_color('#21262d')
+        ax.set_xlim(-1, len(df))
+        step = max(1, len(df)//6)
+        ticks = list(range(0, len(df), step))
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([df["date"].iloc[i].strftime('%m/%d') for i in ticks], fontsize=5, color='#666')
+
+    # کندل 1D
+    ax1 = fig.add_subplot(gs[0, 0])
+    draw_candles(ax1, df_1d, f'{symbol} — Daily')
+
+    # کندل 4H
+    ax2 = fig.add_subplot(gs[0, 1])
+    if df_4h is not None and len(df_4h) > 5:
+        draw_candles(ax2, df_4h, f'{symbol} — 4H')
+    else:
+        ax2.set_facecolor('#0d1117')
+        ax2.text(0.5, 0.5, 'No 4H Data', ha='center', va='center', color='#666', transform=ax2.transAxes)
+
+    # Volume 1D
+    ax3 = fig.add_subplot(gs[1, 0])
+    ax3.set_facecolor('#0d1117')
+    x1d = range(len(df_1d))
+    bar_colors = ['#ffd700' if vol_z.iloc[i] > 2 else ('#26a69a' if df_1d["close"].iloc[i] >= df_1d["open"].iloc[i] else '#ef5350') for i in x1d]
+    ax3.bar(x1d, df_1d["volume"], color=bar_colors, alpha=0.8, width=0.8)
+    ax3.plot(x1d, vol_mean, color='#00e5ff', linewidth=1.2, label='Mean')
+    ax3.plot(x1d, low_thr,  color='#ffd700', linewidth=0.8, linestyle='--', label='Low 2σ')
+    ax3.set_title('Volume (Daily)', color='white', fontsize=8, pad=3)
+    ax3.set_ylabel('Vol', color='#666', fontsize=7)
+    ax3.tick_params(colors='#666', labelsize=6)
+    ax3.yaxis.set_major_formatter(plt.FuncFormatter(lambda v,p: f'{v/1e6:.0f}M' if v>=1e6 else f'{v/1e3:.0f}K'))
+    for sp in ax3.spines.values(): sp.set_color('#21262d')
+
+    # RSI
+    ax4 = fig.add_subplot(gs[1, 1])
+    ax4.set_facecolor('#0d1117')
+    ax4.plot(range(len(rsi_1d)), rsi_1d, color='#ab47bc', linewidth=1.5)
+    ax4.axhline(70, color='#ef5350', linestyle='--', linewidth=0.8, alpha=0.7)
+    ax4.axhline(30, color='#26a69a', linestyle='--', linewidth=0.8, alpha=0.7)
+    ax4.axhline(50, color='#555', linestyle='-', linewidth=0.5, alpha=0.5)
+    ax4.fill_between(range(len(rsi_1d)), rsi_1d, 50,
+                    where=(rsi_1d > 50), alpha=0.1, color='#26a69a')
+    ax4.fill_between(range(len(rsi_1d)), rsi_1d, 50,
+                    where=(rsi_1d < 50), alpha=0.1, color='#ef5350')
+    ax4.annotate(f'RSI: {rsi_1d.iloc[-1]:.0f}', xy=(len(rsi_1d)-1, rsi_1d.iloc[-1]),
+                fontsize=8, color='white',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='#ab47bc', alpha=0.9, edgecolor='none'), ha='right')
+    ax4.set_ylim(0, 100)
+    ax4.set_title('RSI (14)', color='white', fontsize=8, pad=3)
+    ax4.tick_params(colors='#666', labelsize=6)
+    for sp in ax4.spines.values(): sp.set_color('#21262d')
+
+    # Smart Money Flow
+    ax5 = fig.add_subplot(gs[2, :])
+    ax5.set_facecolor('#0d1117')
+    x1d_smf = range(len(smf_1d))
+    ax5.plot(x1d_smf, smf_1d, color='#ff7043', linewidth=1.5, label='SMF Daily')
+    if smf_4h is not None and df_4h is not None:
+        x4h_norm = [i * len(df_1d) / len(df_4h) for i in range(len(smf_4h))]
+        ax5.plot(x4h_norm, smf_4h, color='#42a5f5', linewidth=1, alpha=0.7, label='SMF 4H')
+
+    smf_prev = smf_1d.iloc[-SMF_WINDOW] if len(smf_1d) >= SMF_WINDOW else smf_1d.iloc[0]
+    smf_trend_val = ((smf_1d.iloc[-1] - smf_prev) / abs(smf_prev) * 100) if smf_prev != 0 else 0
+    trend_x = list(range(max(0, len(df_1d)-SMF_WINDOW), len(df_1d)))
+    trend_y = smf_1d.iloc[-SMF_WINDOW:].values
+    if len(trend_x) > 1:
+        z = np.polyfit(trend_x, trend_y, 1)
+        p = np.poly1d(z)
+        tcol = '#26a69a' if z[0] > 0 else '#ef5350'
+        ax5.plot(trend_x, p(trend_x), color=tcol, linewidth=1.5, linestyle='--')
+    trend_lbl = f'{"↑ Uptrend" if smf_trend_val > 0 else "↓ Downtrend"}: {smf_trend_val:+.1f}%'
+    trend_bg  = '#26a69a' if smf_trend_val > 0 else '#ef5350'
+    ax5.annotate(trend_lbl, xy=(len(df_1d)-1, smf_1d.iloc[-1]), fontsize=8, color='white',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor=trend_bg, alpha=0.9, edgecolor='none'), ha='right')
+    ax5.set_title('Smart Money Flow', color='white', fontsize=8, pad=3)
+    ax5.set_ylabel('Ratio', color='#666', fontsize=7)
+    ax5.tick_params(colors='#666', labelsize=6)
+    ax5.legend(facecolor='#0d1117', edgecolor='#21262d', labelcolor='white', fontsize=7, loc='upper left')
+    for sp in ax5.spines.values(): sp.set_color('#21262d')
+
+    fig.suptitle(f'📊 {symbol} — Volume & Smart Money Analysis', color='white', fontsize=12, y=0.99)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=110, bbox_inches='tight', facecolor='#0d1117')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+def create_dex_chart(pair):
+    """چارت ساده برای توکن‌های DEX"""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), facecolor='#0d1117')
+
+    name    = pair.get("baseToken", {}).get("symbol", "TOKEN")
+    chain   = pair.get("chainId", "")
+    price   = float(pair.get("priceUsd", 0) or 0)
+    liq     = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+    mc      = float(pair.get("marketCap", 0) or 0)
+    vol_h1  = float(pair.get("volume", {}).get("h1", 0) or 0)
+    vol_h6  = float(pair.get("volume", {}).get("h6", 0) or 0)
+    vol_h24 = float(pair.get("volume", {}).get("h24", 0) or 0)
+    p1h  = float(pair.get("priceChange", {}).get("h1", 0) or 0)
+    p6h  = float(pair.get("priceChange", {}).get("h6", 0) or 0)
+    p24h = float(pair.get("priceChange", {}).get("h24", 0) or 0)
+
+    # نمودار تغییر قیمت
+    ax1 = axes[0]
+    ax1.set_facecolor('#0d1117')
+    timeframes = ['1H', '6H', '24H']
+    changes    = [p1h, p6h, p24h]
+    colors     = ['#26a69a' if c > 0 else '#ef5350' for c in changes]
+    bars = ax1.bar(timeframes, changes, color=colors, alpha=0.85, width=0.5)
+    for bar, val in zip(bars, changes):
+        ax1.text(bar.get_x() + bar.get_width()/2., bar.get_height() + (0.5 if val >= 0 else -1.5),
+                f'{val:+.1f}%', ha='center', va='bottom' if val >= 0 else 'top',
+                color='white', fontsize=10, fontweight='bold')
+    ax1.axhline(0, color='#444', linewidth=0.8)
+    ax1.set_title(f'{name} — Price Change %', color='white', fontsize=10)
+    ax1.tick_params(colors='#888', labelsize=9)
+    ax1.set_facecolor('#0d1117')
+    for sp in ax1.spines.values(): sp.set_color('#21262d')
+
+    # نمودار حجم
+    ax2 = axes[1]
+    ax2.set_facecolor('#0d1117')
+    vols   = [vol_h1, vol_h6, vol_h24]
+    vlabels= ['1H', '6H', '24H']
+    vcols  = ['#ffd700', '#42a5f5', '#ab47bc']
+    bars2  = ax2.bar(vlabels, vols, color=vcols, alpha=0.85, width=0.5)
+    for bar, val in zip(bars2, vols):
+        label = f'${val/1e6:.2f}M' if val >= 1e6 else f'${val/1e3:.1f}K'
+        ax2.text(bar.get_x() + bar.get_width()/2., bar.get_height(),
+                label, ha='center', va='bottom', color='white', fontsize=9)
+    ax2.set_title(f'{name} — Volume (USD)', color='white', fontsize=10)
+    ax2.tick_params(colors='#888', labelsize=9)
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda v,p: f'${v/1e6:.1f}M' if v>=1e6 else f'${v/1e3:.0f}K'))
+    for sp in ax2.spines.values(): sp.set_color('#21262d')
+
+    chain_icon = {"solana":"◎","ethereum":"Ξ","bsc":"⬡","base":"🔵","arbitrum":"🔷"}.get(chain,"🔗")
+    fig.suptitle(f'{chain_icon} {name}/{pair.get("quoteToken",{}).get("symbol","?")} on {chain.upper()} | 💰 ${price:.6g}',
+                color='white', fontsize=11, y=1.01)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=110, bbox_inches='tight', facecolor='#0d1117')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+# ==================== تلگرام ====================
+
+def send_photo(buf, caption):
+    buf.seek(0)
+    r = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+        files={"photo": ("chart.png", buf, "image/png")},
+        data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+        timeout=30)
+    return r.status_code == 200
+
+def send_msg(text):
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"},
+        timeout=10)
+
+def risk_bar(risk):
+    filled = round(risk / 10)
+    bar = "🟥" * filled + "⬜" * (10 - filled)
+    return bar
+
+def pump_bar(score):
+    filled = round(score / 10)
+    bar = "🟩" * filled + "⬜" * (10 - filled)
+    return bar
+
+def format_binance_signal(symbol, score, signals, risk_factors, risk, ticker, df_1d):
+    price      = float(ticker.get("lastPrice", 0))
+    change_24h = float(ticker.get("priceChangePercent", 0))
+    vol_24h    = float(ticker.get("quoteVolume", 0))
+    high_24h   = float(ticker.get("highPrice", 0))
+    low_24h    = float(ticker.get("lowPrice", 0))
+
+    if score >= 80:   emoji, strength = "🚨🚀", "بسیار قوی"
+    elif score >= 65: emoji, strength = "🟢🔥", "قوی"
+    else:             emoji, strength = "🟡📊", "متوسط"
+
+    # تخمین درصد پامپ بر اساس امتیاز و مومنتوم
+    pump_est = round(score * 0.4 + (change_24h if change_24h > 0 else 0) * 0.3, 1)
+
+    buy_link = f"https://www.binance.com/en/trade/{symbol.replace('USDT','_USDT')}"
+
+    msg = f"""{emoji} <b>سیگنال Binance: #{symbol}</b>
+
+💰 قیمت: <code>{price:.6g} USDT</code>
+📈 تغییر 24h: <b>{change_24h:+.2f}%</b>
+🔺 High: <code>{high_24h:.6g}</code> | 🔻 Low: <code>{low_24h:.6g}</code>
+📦 حجم 24h: <code>${vol_24h:,.0f}</code>
+
+━━━━━━━━━━━━━━━━━━
+🎯 <b>امتیاز پامپ: {score}/100</b>
+{pump_bar(score)}
+
+⚡ <b>پتانسیل پامپ: ~{pump_est:.1f}%</b>
+⚠️ <b>درصد ریسک: {risk}%</b>
+{risk_bar(risk)}
+━━━━━━━━━━━━━━━━━━
+
+✅ <b>سیگنال‌ها:</b>
+"""
+    for s in signals:
+        msg += f"  • {s}\n"
+
+    if risk_factors:
+        msg += "\n🚩 <b>عوامل ریسک:</b>\n"
+        for r in risk_factors:
+            msg += f"  • {r}\n"
+
+    msg += f"""
+🛒 <b>لینک خرید:</b>
+<a href="{buy_link}">Binance — {symbol}</a>
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC
+⚠️ <i>تحلیل الگوریتمی — نه توصیه مالی</i>"""
+    return msg
+
+def format_dex_signal(pair, score, signals, risk_factors, risk):
+    base    = pair.get("baseToken", {})
+    quote   = pair.get("quoteToken", {})
+    chain   = pair.get("chainId", "")
+    name    = base.get("name", "")
+    symbol  = base.get("symbol", "")
+    ca      = base.get("address", "N/A")
+    price   = float(pair.get("priceUsd", 0) or 0)
+    p1h     = float(pair.get("priceChange", {}).get("h1", 0) or 0)
+    p24h    = float(pair.get("priceChange", {}).get("h24", 0) or 0)
+    vol_24h = float(pair.get("volume", {}).get("h24", 0) or 0)
+    liq     = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+    mc      = float(pair.get("marketCap", 0) or 0)
+    dex_url = pair.get("url", "")
+    pair_addr = pair.get("pairAddress", "")
+
+    if score >= 80:   emoji, strength = "🚨🚀", "بسیار قوی"
+    elif score >= 65: emoji, strength = "🟢🔥", "قوی"
+    else:             emoji, strength = "🟡📊", "متوسط"
+
+    pump_est = round(score * 0.45 + max(p1h, 0) * 0.3, 1)
+
+    chain_icon = {"solana":"◎ Solana","ethereum":"Ξ Ethereum","bsc":"⬡ BSC",
+                  "base":"🔵 Base","arbitrum":"🔷 Arbitrum","polygon":"🟣 Polygon",
+                  "avalanche":"🔺 Avalanche","ton":"💎 TON"}.get(chain, f"🔗 {chain.upper()}")
+
+    # لینک‌های خرید بر اساس زنجیره
+    buy_links = {
+        "solana":   f"https://raydium.io/swap/?inputCurrency=sol&outputCurrency={ca}",
+        "ethereum": f"https://app.uniswap.org/swap?outputCurrency={ca}",
+        "bsc":      f"https://pancakeswap.finance/swap?outputCurrency={ca}",
+        "base":     f"https://app.uniswap.org/swap?chain=base&outputCurrency={ca}",
+        "arbitrum": f"https://app.uniswap.org/swap?chain=arbitrum&outputCurrency={ca}",
+        "polygon":  f"https://app.uniswap.org/swap?chain=polygon&outputCurrency={ca}",
+    }
+    buy_url = buy_links.get(chain, dex_url)
+
+    msg = f"""{emoji} <b>سیگنال DEX: #{symbol}</b> ({name})
+🔗 زنجیره: <b>{chain_icon}</b>
+
+💰 قیمت: <code>${price:.8g}</code>
+📈 تغییر 1h: <b>{p1h:+.2f}%</b> | 24h: <b>{p24h:+.2f}%</b>
+📦 حجم 24h: <code>${vol_24h:,.0f}</code>
+💧 نقدینگی: <code>${liq:,.0f}</code>
+🏦 Market Cap: <code>${mc:,.0f}</code>
+
+━━━━━━━━━━━━━━━━━━
+🎯 <b>امتیاز پامپ: {score}/100</b>
+{pump_bar(score)}
+
+⚡ <b>پتانسیل پامپ: ~{pump_est:.1f}%</b>
+⚠️ <b>درصد ریسک: {risk}%</b>
+{risk_bar(risk)}
+━━━━━━━━━━━━━━━━━━
+
+📋 <b>آدرس قرارداد:</b>
+<code>{ca}</code>
+
+✅ <b>سیگنال‌ها:</b>
+"""
+    for s in signals:
+        msg += f"  • {s}\n"
+
+    if risk_factors:
+        msg += "\n🚩 <b>عوامل ریسک:</b>\n"
+        for r in risk_factors:
+            msg += f"  • {r}\n"
+
+    msg += f"""
+🛒 <b>لینک خرید:</b>
+<a href="{buy_url}">خرید روی DEX</a>
+
+📊 <b>DexScreener:</b>
+<a href="{dex_url}">مشاهده چارت</a>
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC
+⚠️ <i>تحلیل الگوریتمی — نه توصیه مالی</i>"""
+    return msg
+
+# ==================== اسکنر ====================
+
+def scan_binance():
+    results = []
+    logger.info(f"اسکن {len(BINANCE_SYMBOLS)} ارز Binance...")
+    for symbol in BINANCE_SYMBOLS:
+        try:
+            df_1d = get_klines(symbol, "1d", 50)
+            df_4h = get_klines(symbol, "4h", 60)
+            if df_1d is None or len(df_1d) < VOLUME_WINDOW + 5:
+                continue
+            ticker = get_ticker_24h(symbol)
+            score, signals, risk_factors, risk = calculate_pump_score_binance(df_1d, ticker)
+            if score >= PUMP_SCORE_MIN:
+                smf = calculate_smart_money_flow(df_1d)
+                smf_prev = smf.iloc[-SMF_WINDOW] if len(smf) >= SMF_WINDOW else smf.iloc[0]
+                results.append({
+                    "type": "binance", "symbol": symbol, "score": score,
+                    "signals": signals, "risk_factors": risk_factors, "risk": risk,
+                    "df_1d": df_1d, "df_4h": df_4h, "ticker": ticker
+                })
+                logger.info(f"✅ Binance {symbol}: score={score} risk={risk}%")
+            time.sleep(0.15)
+        except Exception as e:
+            logger.error(f"خطا {symbol}: {e}")
+    return sorted(results, key=lambda x: x["score"], reverse=True)
+
+def scan_dex():
+    results = []
+    logger.info("اسکن توکن‌های DEX...")
+
+    # جستجوهای مختلف
+    queries = ["trending", "pump", "moon", "gem", "new", "hot"]
+    seen_addresses = set()
+
+    for query in queries:
+        try:
+            pairs = search_dex_token(query)
+            for pair in pairs:
+                ca = pair.get("baseToken", {}).get("address", "")
+                if ca in seen_addresses or not ca:
+                    continue
+                seen_addresses.add(ca)
+
+                score, signals, risk_factors, risk = calculate_pump_score_dex(pair)
+                if score >= PUMP_SCORE_MIN:
+                    results.append({
+                        "type": "dex", "pair": pair, "score": score,
+                        "signals": signals, "risk_factors": risk_factors, "risk": risk
+                    })
+                    sym = pair.get("baseToken", {}).get("symbol", "?")
+                    logger.info(f"✅ DEX {sym}: score={score} risk={risk}%")
+            time.sleep(0.3)
+        except Exception as e:
+            logger.error(f"خطا در DEX query '{query}': {e}")
+
+    return sorted(results, key=lambda x: x["score"], reverse=True)
+
+def run_bot():
+    send_msg(f"""🤖 <b>Ultra Crypto Pump Bot فعال شد</b>
+
+📊 منابع: Binance + DexScreener (همه زنجیره‌ها)
+🔍 تعداد ارز: {len(BINANCE_SYMBOLS)} Binance + DEX Scan
+⏱ بازه اسکن: هر {SCAN_INTERVAL//60} دقیقه
+🎯 حداقل امتیاز: {PUMP_SCORE_MIN}/100
+🔗 زنجیره‌ها: {', '.join(CHAINS)}
+
+✅ شروع اسکن...""")
+
+    while True:
+        try:
+            # اسکن Binance
+            binance_results = scan_binance()
+            # اسکن DEX
+            dex_results = scan_dex()
+
+            all_results = binance_results + dex_results
+            all_results.sort(key=lambda x: x["score"], reverse=True)
+
+            if all_results:
+                # خلاصه
+                summary = f"🔍 <b>نتایج اسکن — {datetime.now().strftime('%H:%M')}</b>\n\n"
+                summary += f"🟢 Binance: {len(binance_results)} سیگنال\n"
+                summary += f"🔗 DEX: {len(dex_results)} سیگنال\n\n"
+                summary += "<b>برترین سیگنال‌ها:</b>\n"
+                for r in all_results[:6]:
+                    if r["type"] == "binance":
+                        sym = r["symbol"]
+                    else:
+                        sym = r["pair"].get("baseToken", {}).get("symbol", "?")
+                        chain = r["pair"].get("chainId", "")[:3].upper()
+                        sym = f"{sym}[{chain}]"
+                    bar = "█" * (r["score"]//10) + "░" * (10 - r["score"]//10)
+                    summary += f"• <b>{sym}</b>: {r['score']}/100 [{bar}] ⚠️{r['risk']}%\n"
+                send_msg(summary)
+                time.sleep(1)
+
+                # ارسال جزئیات برترین‌ها
+                for result in all_results[:4]:
+                    try:
+                        if result["type"] == "binance":
+                            chart = create_binance_chart(result["symbol"], result["df_1d"], result["df_4h"], result["ticker"])
+                            caption = format_binance_signal(result["symbol"], result["score"],
+                                                            result["signals"], result["risk_factors"],
+                                                            result["risk"], result["ticker"], result["df_1d"])
+                        else:
+                            chart = create_dex_chart(result["pair"])
+                            caption = format_dex_signal(result["pair"], result["score"],
+                                                        result["signals"], result["risk_factors"], result["risk"])
+                        # تلگرام max caption = 1024
+                        if len(caption) > 1020:
+                            caption = caption[:1020] + "..."
+                        send_photo(chart, caption)
+                        time.sleep(2)
+                    except Exception as e:
+                        logger.error(f"خطا در ارسال سیگنال: {e}")
+            else:
+                logger.info("هیچ سیگنالی پیدا نشد")
+
+        except Exception as e:
+            logger.error(f"خطای کلی: {e}")
+            send_msg(f"⚠️ خطا: {str(e)[:150]}")
+
+        logger.info(f"⏳ انتظار {SCAN_INTERVAL}s...")
+        time.sleep(SCAN_INTERVAL)
 
 if __name__ == "__main__":
-    main()
+    run_bot()
