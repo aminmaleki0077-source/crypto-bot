@@ -31,8 +31,8 @@ MORALIS_HEADERS = {
 # پارامترها
 VOLUME_WINDOW        = 20
 SMF_WINDOW           = 10
-SCAN_INTERVAL        = 300     # هر 5 دقیقه
-PUMP_SCORE_MIN       = 70      # حداقل امتیاز (بالاتر = دقیق‌تر)
+SCAN_INTERVAL        = 240     # هر 4 دقیقه
+PUMP_SCORE_MIN       = 55      # حداقل امتیاز
 SIGNAL_COOLDOWN      = 3600    # هر ارز حداقل 1 ساعت دیگر سیگنال نده
 
 # ضد تکرار: ذخیره آخرین زمان ارسال هر سیگنال
@@ -654,46 +654,158 @@ def scan_binance():
             logger.error(f"خطا {sym}: {e}")
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
+def get_dex_latest_boosted():
+    """توکن‌های boosted از DexScreener"""
+    try:
+        r = requests.get("https://api.dexscreener.com/token-boosts/latest/v1", timeout=10)
+        if r.status_code == 200:
+            return r.json() or []
+    except:
+        pass
+    return []
+
+def get_dex_top_boosted():
+    """توکن‌های top boosted"""
+    try:
+        r = requests.get("https://api.dexscreener.com/token-boosts/top/v1", timeout=10)
+        if r.status_code == 200:
+            return r.json() or []
+    except:
+        pass
+    return []
+
+def get_pair_from_token(ca, chain):
+    """گرفتن جفت معاملاتی از آدرس توکن"""
+    try:
+        r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{ca}", timeout=10)
+        if r.status_code == 200:
+            pairs = r.json().get("pairs", []) or []
+            # بهترین جفت بر اساس حجم
+            pairs = [p for p in pairs if p.get("chainId") == chain]
+            if pairs:
+                return max(pairs, key=lambda x: float(x.get("volume",{}).get("h24",0) or 0))
+    except:
+        pass
+    return None
+
 def scan_dex():
     results = []
     seen = set()
-    queries = ["pump","trending","moon","gem","pepe","doge","sol","eth"]
     logger.info("اسکن DEX...")
 
-    for q in queries:
+    # منبع 1: توکن‌های boosted (واقعی‌ترین سیگنال)
+    all_boosted = []
+    try:
+        all_boosted += get_dex_latest_boosted()
+        all_boosted += get_dex_top_boosted()
+    except:
+        pass
+
+    for item in all_boosted:
         try:
-            pairs = search_dex(q, min_volume=50000, min_liquidity=20000)
-            for pair in pairs:
+            ca    = item.get("tokenAddress","")
+            chain = item.get("chainId","")
+            if not ca or not chain: continue
+            key = f"{chain}_{ca}"
+            if key in seen: continue
+            seen.add(key)
+
+            signal_key = f"DEX_{key}"
+            if is_already_sent(signal_key): continue
+
+            pair = get_pair_from_token(ca, chain)
+            if not pair: continue
+
+            vol24h = float(pair.get("volume",{}).get("h24",0) or 0)
+            liq    = float(pair.get("liquidity",{}).get("usd",0) or 0)
+            if vol24h < 20000 or liq < 10000: continue
+
+            score, sigs, risks, risk = score_dex(pair)
+            sym = pair.get("baseToken",{}).get("symbol","?")
+            if score >= PUMP_SCORE_MIN:
+                results.append({"type":"dex","pair":pair,"score":score,
+                                "signals":sigs,"risks":risks,"risk":risk,
+                                "signal_key":signal_key})
+                logger.info(f"✅ DEX Boosted {sym}/{chain}: {score}/100 ریسک={risk}%")
+            time.sleep(0.2)
+        except Exception as e:
+            logger.error(f"خطا boosted item: {e}")
+
+    # منبع 2: جستجوی مستقیم با کلمات کلیدی پرمعنا
+    keywords = ["usdt","sol","eth","bnb","pepe","doge","shib","ai","btc"]
+    for kw in keywords:
+        try:
+            pairs = search_dex(kw, min_volume=30000, min_liquidity=15000)
+            for pair in pairs[:5]:
                 ca    = pair.get("baseToken",{}).get("address","")
                 chain = pair.get("chainId","")
                 key   = f"{chain}_{ca}"
                 sym   = pair.get("baseToken",{}).get("symbol","?")
                 signal_key = f"DEX_{key}"
 
-                if key in seen or not ca:
-                    continue
-                if is_already_sent(signal_key):
-                    continue
+                if key in seen or not ca: continue
+                if is_already_sent(signal_key): continue
                 seen.add(key)
+
+                # فیلتر: فقط پامپ‌های اخیر
+                p1h = float(pair.get("priceChange",{}).get("h1",0) or 0)
+                if p1h < 1: continue  # حداقل 1% رشد در 1 ساعت
 
                 score, sigs, risks, risk = score_dex(pair)
                 if score >= PUMP_SCORE_MIN:
                     results.append({"type":"dex","pair":pair,"score":score,
                                     "signals":sigs,"risks":risks,"risk":risk,
                                     "signal_key":signal_key})
-                    logger.info(f"✅ DEX {sym}/{chain}: {score}/100 ریسک={risk}%")
-            time.sleep(0.3)
+                    logger.info(f"✅ DEX Search {sym}/{chain}: {score}/100 ریسک={risk}%")
+            time.sleep(0.25)
         except Exception as e:
-            logger.error(f"خطا DEX '{q}': {e}")
+            logger.error(f"خطا DEX '{kw}': {e}")
+
+    # منبع 3: Moralis top gainers
+    try:
+        gainers = get_moralis_top_gainers()
+        for g in gainers[:15]:
+            try:
+                ca    = g.get("tokenAddress","") or g.get("address","")
+                chain = g.get("chain","ethereum").lower()
+                if not ca: continue
+                key = f"{chain}_{ca}"
+                if key in seen: continue
+                seen.add(key)
+                signal_key = f"DEX_{key}"
+                if is_already_sent(signal_key): continue
+
+                pair = get_pair_from_token(ca, chain)
+                if not pair: continue
+
+                vol24h = float(pair.get("volume",{}).get("h24",0) or 0)
+                liq    = float(pair.get("liquidity",{}).get("usd",0) or 0)
+                if vol24h < 20000 or liq < 10000: continue
+
+                score, sigs, risks, risk = score_dex(pair)
+                sym = pair.get("baseToken",{}).get("symbol","?")
+                if score >= PUMP_SCORE_MIN:
+                    results.append({"type":"dex","pair":pair,"score":score,
+                                    "signals":sigs,"risks":risks,"risk":risk,
+                                    "signal_key":signal_key})
+                    logger.info(f"✅ Moralis Gainer {sym}: {score}/100 ریسک={risk}%")
+                time.sleep(0.2)
+            except Exception as e:
+                logger.error(f"خطا moralis gainer: {e}")
+    except Exception as e:
+        logger.error(f"خطا moralis gainers: {e}")
 
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
 # ==================== اجرا ====================
 
 def run_bot():
-    send_msg(f"""🤖 <b>Ultra Crypto Pump Bot v3 فعال شد</b>
+    send_msg(f"""🤖 <b>Ultra Crypto Pump Bot v3.1 فعال شد</b>
 
-📊 منابع: Binance + DexScreener + Moralis
+📊 منابع:
+  • Binance ({len(BINANCE_SYMBOLS)} ارز)
+  • DexScreener (Boosted + Search)
+  • Moralis (Top Gainers)
 🛡 ضد تکرار: هر سیگنال حداقل 1 ساعت فاصله
 🎯 حداقل امتیاز: {PUMP_SCORE_MIN}/100
 ⏱ اسکن: هر {SCAN_INTERVAL//60} دقیقه
